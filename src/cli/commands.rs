@@ -1390,19 +1390,48 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 
 /// Start debug server for remote connections
 pub fn server(args: ServerArgs) -> Result<()> {
-    print_info("Remote debugging server is not yet implemented in this build");
-    print_info(format!("Requested port: {}", args.port));
+    print_info(format!("Starting remote debug server on port {}", args.port));
     if args.token.is_some() {
-        print_info("Token authentication would be enabled");
+        print_info("Token authentication enabled");
+    } else {
+        print_info("Token authentication disabled");
     }
-    Err(DebuggerError::ExecutionError("Server mode not yet implemented".to_string()).into())
+    if args.tls_cert.is_some() || args.tls_key.is_some() {
+        print_info("TLS enabled");
+    }
+
+    let server = crate::server::DebugServer::new(
+        args.token.clone(),
+        args.tls_cert.as_deref(),
+        args.tls_key.as_deref(),
+    )?;
+
+    tokio::runtime::Runtime::new()
+        .map_err(|e: std::io::Error| miette::miette!(e))
+        .and_then(|rt| rt.block_on(server.run(args.port)))
 }
 
 /// Connect to remote debug server
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
-    print_info("Remote debugging client is not yet implemented in this build");
-    print_info(format!("Requested connection to: {}", args.remote));
-    Err(DebuggerError::ExecutionError("Remote mode not yet implemented".to_string()).into())
+    print_info(format!("Connecting to remote debugger at {}", args.remote));
+    let mut client = crate::client::RemoteClient::connect(&args.remote, args.token.clone())?;
+
+    if let Some(contract) = &args.contract {
+        print_info(format!("Loading contract: {:?}", contract));
+        let size = client.load_contract(&contract.to_string_lossy())?;
+        print_success(format!("Contract loaded: {} bytes", size));
+    }
+
+    if let Some(function) = &args.function {
+        print_info(format!("Executing function: {}", function));
+        let result = client.execute(function, args.args.as_deref())?;
+        print_success(format!("Result: {}", result));
+        return Ok(());
+    }
+
+    client.ping()?;
+    print_success("Remote debugger is reachable");
+    Ok(())
 }
 /// Launch interactive debugger UI
 pub fn interactive(args: InteractiveArgs, _verbosity: Verbosity) -> Result<()> {

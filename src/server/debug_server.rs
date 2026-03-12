@@ -1,29 +1,26 @@
 use crate::debugger::engine::DebuggerEngine;
-use crate::protocol::{DebugRequest, DebugResponse};
+use crate::inspector::budget::BudgetInspector;
+use crate::server::protocol::{DebugMessage, DebugRequest, DebugResponse};
+use crate::simulator::SnapshotLoader;
 use crate::Result;
 use std::fs;
-use std::io::BufReader;
+use std::io::BufReader as StdBufReader;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
 pub struct DebugServer {
-    engine: DebuggerEngine,
-    token: String,
+    engine: Option<DebuggerEngine>,
+    token: Option<String>,
     tls_config: Option<ServerConfig>,
 }
 
 impl DebugServer {
-    pub fn new(
-        engine: DebuggerEngine,
-        token: String,
-        cert_path: Option<&Path>,
-        key_path: Option<&Path>,
-    ) -> Result<Self> {
+    pub fn new(token: Option<String>, cert_path: Option<&Path>, key_path: Option<&Path>) -> Result<Self> {
         let tls_config = if let (Some(cp), Some(kp)) = (cert_path, key_path) {
             Some(load_tls_config(cp, kp)?)
         } else {
@@ -31,7 +28,7 @@ impl DebugServer {
         };
 
         Ok(Self {
-            engine,
+            engine: None,
             token,
             tls_config,
         })
@@ -71,94 +68,325 @@ impl DebugServer {
         }
     }
 
-    async fn handle_single_connection<S>(&mut self, mut stream: S) -> Result<()>
+    async fn handle_single_connection<S>(&mut self, stream: S) -> Result<()>
     where
-        S: AsyncReadExt + AsyncWriteExt + Unpin,
+        S: tokio::io::AsyncRead + AsyncWriteExt + Unpin,
     {
-        let mut authenticated = false;
-        let mut buffer = vec![0u8; 8192];
+        let mut authenticated = self.token.is_none();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
 
         loop {
-            let n = stream
-                .read(&mut buffer)
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
                 .await
                 .map_err(|e| miette::miette!("Failed to read from stream: {}", e))?;
             if n == 0 {
                 break;
             }
 
-            let request: DebugRequest = match serde_json::from_slice(&buffer[..n]) {
-                Ok(req) => req,
+            let message: DebugMessage = match serde_json::from_str(line.trim_end()) {
+                Ok(msg) => msg,
                 Err(e) => {
                     warn!("Failed to parse request: {}", e);
                     continue;
                 }
             };
+            let Some(request) = message.request else {
+                warn!("Received message without request");
+                continue;
+            };
             info!("Received request: {:?}", request);
 
-            if !authenticated {
-                if let DebugRequest::Handshake {
-                    token: ref req_token,
-                } = request
-                {
-                    if req_token == &self.token {
-                        authenticated = true;
-                        send_response(&mut stream, DebugResponse::AuthSuccess).await?;
-                        continue;
-                    } else {
-                        send_response(&mut stream, DebugResponse::AuthFailed).await?;
-                        return Ok(());
-                    }
-                } else {
-                    send_response(
-                        &mut stream,
-                        DebugResponse::Error("Authentication required".to_string()),
-                    )
-                    .await?;
-                    return Ok(());
-                }
+            if matches!(request, DebugRequest::Ping) {
+                let response = DebugMessage::response(message.id, DebugResponse::Pong);
+                send_response(&mut writer, response).await?;
+                continue;
             }
 
+            if !authenticated {
+                if let DebugRequest::Authenticate { token } = request {
+                    let success = self.token.as_deref().map(|t| t == token).unwrap_or(true);
+                    authenticated = success;
+                    let response = DebugResponse::Authenticated {
+                        success,
+                        message: if success {
+                            "Authentication successful".to_string()
+                        } else {
+                            "Authentication failed".to_string()
+                        },
+                    };
+                    let response = DebugMessage::response(message.id, response);
+                    send_response(&mut writer, response).await?;
+                    if !success {
+                        return Ok(());
+                    }
+                    continue;
+                }
+
+                let response = DebugMessage::response(
+                    message.id,
+                    DebugResponse::Error {
+                        message: "Authentication required".to_string(),
+                    },
+                );
+                send_response(&mut writer, response).await?;
+                continue;
+            }
+
+            let is_disconnect = matches!(&request, DebugRequest::Disconnect);
             let response = match request {
-                DebugRequest::Handshake { .. } => {
-                    DebugResponse::Error("Already authenticated".to_string())
-                }
-                DebugRequest::Step => match self.engine.step() {
-                    Ok(_) => DebugResponse::Ok,
-                    Err(e) => DebugResponse::Error(e.to_string()),
+                DebugRequest::Authenticate { .. } => DebugResponse::Authenticated {
+                    success: true,
+                    message: "Already authenticated".to_string(),
                 },
-                DebugRequest::Continue => match self.engine.continue_execution() {
-                    Ok(_) => DebugResponse::Ok,
-                    Err(e) => DebugResponse::Error(e.to_string()),
-                },
-                DebugRequest::AddBreakpoint { function } => {
-                    self.engine.breakpoints_mut().add(&function);
-                    DebugResponse::Ok
-                }
-                DebugRequest::RemoveBreakpoint { function } => {
-                    self.engine.breakpoints_mut().remove(&function);
-                    DebugResponse::Ok
-                }
-                DebugRequest::GetState => match self.engine.state().lock() {
-                    Ok(state) => DebugResponse::State(state.clone()),
-                    Err(e) => DebugResponse::Error(format!("Failed to acquire state lock: {}", e)),
-                },
-                DebugRequest::Execute { function, args } => {
-                    match self.engine.execute(&function, args.as_deref()) {
-                        Ok(res) => DebugResponse::ExecutionResult { result: res },
-                        Err(e) => DebugResponse::Error(e.to_string()),
+                DebugRequest::LoadContract { contract_path } => {
+                    match fs::read(&contract_path) {
+                        Ok(bytes) => match crate::runtime::executor::ContractExecutor::new(bytes) {
+                            Ok(executor) => {
+                                self.engine = Some(DebuggerEngine::new(executor, Vec::new()));
+                                DebugResponse::ContractLoaded {
+                                    size: fs::metadata(&contract_path)
+                                        .map(|m| m.len() as usize)
+                                        .unwrap_or(0),
+                                }
+                            }
+                            Err(e) => DebugResponse::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        Err(e) => DebugResponse::Error {
+                            message: format!("Failed to read contract {:?}: {}", contract_path, e),
+                        },
                     }
                 }
+                DebugRequest::Execute { function, args } => match self.engine.as_mut() {
+                    Some(engine) => match engine.execute(&function, args.as_deref()) {
+                        Ok(res) => DebugResponse::ExecutionResult {
+                            success: true,
+                            output: res,
+                            error: None,
+                        },
+                        Err(e) => DebugResponse::ExecutionResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(e.to_string()),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::Step => match self.engine.as_mut() {
+                    Some(engine) => match engine.step() {
+                        Ok(_) => {
+                            let (current_function, step_count) =
+                                engine.state().lock().map(|state| {
+                                    (
+                                        state.current_function().map(|s| s.to_string()),
+                                        state.step_count() as u64,
+                                    )
+                                }).unwrap_or((None, 0));
+                            DebugResponse::StepResult {
+                                paused: engine.is_paused(),
+                                current_function,
+                                step_count,
+                            }
+                        }
+                        Err(e) => DebugResponse::Error {
+                            message: e.to_string(),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::Continue => match self.engine.as_mut() {
+                    Some(engine) => match engine.continue_execution() {
+                        Ok(_) => DebugResponse::ContinueResult {
+                            completed: true,
+                            output: None,
+                            error: None,
+                        },
+                         Err(e) => DebugResponse::ContinueResult {
+                            completed: false,
+                            output: None,
+                            error: Some(e.to_string()),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::Inspect => match self.engine.as_ref() {
+                    Some(engine) => match engine.state().lock() {
+                        Ok(state) => {
+                            let call_stack = state
+                                .call_stack()
+                                .get_stack()
+                                .iter()
+                                .map(|frame| {
+                                    let suffix = frame
+                                        .contract_id
+                                        .as_ref()
+                                        .map(|id| format!(" [{}]", id))
+                                        .unwrap_or_default();
+                                    format!("{}{}", frame.function, suffix)
+                                })
+                                .collect();
+                            DebugResponse::InspectionResult {
+                                function: state.current_function().map(|s| s.to_string()),
+                                step_count: state.step_count() as u64,
+                                paused: engine.is_paused(),
+                                call_stack,
+                            }
+                        }
+                        Err(e) => DebugResponse::Error {
+                            message: format!("Failed to acquire state lock: {}", e),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::GetStorage => match self.engine.as_ref() {
+                    Some(engine) => match engine.executor().get_storage_snapshot() {
+                        Ok(snapshot) => match serde_json::to_string(&snapshot) {
+                            Ok(json) => DebugResponse::StorageState { storage_json: json },
+                            Err(e) => DebugResponse::Error {
+                                message: format!("Failed to serialize storage snapshot: {}", e),
+                            },
+                        },
+                        Err(e) => DebugResponse::Error {
+                            message: e.to_string(),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::GetStack => match self.engine.as_ref() {
+                    Some(engine) => match engine.state().lock() {
+                        Ok(state) => {
+                            let stack = state
+                                .call_stack()
+                                .get_stack()
+                                .iter()
+                                .map(|frame| {
+                                    let suffix = frame
+                                        .contract_id
+                                        .as_ref()
+                                        .map(|id| format!(" [{}]", id))
+                                        .unwrap_or_default();
+                                    format!("{}{}", frame.function, suffix)
+                                })
+                                .collect();
+                            DebugResponse::CallStack { stack }
+                        }
+                        Err(e) => DebugResponse::Error {
+                            message: format!("Failed to acquire state lock: {}", e),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::GetBudget => match self.engine.as_ref() {
+                    Some(engine) => {
+                        let info = BudgetInspector::get_cpu_usage(engine.executor().host());
+                        DebugResponse::BudgetInfo {
+                            cpu_instructions: info.cpu_instructions,
+                            memory_bytes: info.memory_bytes,
+                        }
+                    }
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::SetBreakpoint { function } => match self.engine.as_mut() {
+                    Some(engine) => {
+                        engine.breakpoints_mut().add(&function);
+                        DebugResponse::BreakpointSet { function }
+                    }
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::ClearBreakpoint { function } => match self.engine.as_mut() {
+                    Some(engine) => {
+                        engine.breakpoints_mut().remove(&function);
+                        DebugResponse::BreakpointCleared { function }
+                    }
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::ListBreakpoints => match self.engine.as_mut() {
+                    Some(engine) => DebugResponse::BreakpointsList {
+                        breakpoints: engine.breakpoints_mut().list(),
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::SetStorage { storage_json } => match self.engine.as_mut() {
+                    Some(engine) => match engine.executor_mut().set_initial_storage(storage_json) {
+                        Ok(_) => match engine.executor().get_storage_snapshot() {
+                            Ok(snapshot) => match serde_json::to_string(&snapshot) {
+                                Ok(json) => DebugResponse::StorageState { storage_json: json },
+                                Err(e) => DebugResponse::Error {
+                                    message: format!(
+                                        "Failed to serialize storage snapshot: {}",
+                                        e
+                                    ),
+                                },
+                            },
+                            Err(e) => DebugResponse::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        Err(e) => DebugResponse::Error {
+                            message: e.to_string(),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::LoadSnapshot { snapshot_path } => {
+                    match SnapshotLoader::from_file(snapshot_path) {
+                        Ok(loader) => match loader.apply_to_environment() {
+                            Ok(loaded) => DebugResponse::SnapshotLoaded {
+                                summary: loaded.format_summary(),
+                            },
+                            Err(e) => DebugResponse::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        Err(e) => DebugResponse::Error {
+                            message: e.to_string(),
+                        },
+                    }
+                }
+                DebugRequest::Ping => DebugResponse::Pong,
+                DebugRequest::Disconnect => DebugResponse::Disconnected,
             };
 
-            send_response(&mut stream, response).await?;
+            let response = DebugMessage::response(message.id, response);
+            send_response(&mut writer, response).await?;
+
+            if is_disconnect {
+                break;
+            }
         }
 
         Ok(())
     }
 }
 
-async fn send_response<S>(stream: &mut S, response: DebugResponse) -> Result<()>
+async fn send_response<S>(stream: &mut S, response: DebugMessage) -> Result<()>
 where
     S: AsyncWriteExt + Unpin,
 {
@@ -168,13 +396,17 @@ where
         .write_all(&json)
         .await
         .map_err(|e| miette::miette!("Failed to write response: {}", e))?;
+    stream
+        .write_all(b"\n")
+        .await
+        .map_err(|e| miette::miette!("Failed to write response newline: {}", e))?;
     Ok(())
 }
 
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
     let cert_file = fs::File::open(cert_path)
         .map_err(|e| miette::miette!("Failed to open cert file {:?}: {}", cert_path, e))?;
-    let mut cert_reader = BufReader::new(cert_file);
+    let mut cert_reader = StdBufReader::new(cert_file);
     let certs = rustls_pemfile::certs(&mut cert_reader)
         .map_err(|e| miette::miette!("Failed to read certs: {}", e))?
         .into_iter()
@@ -183,7 +415,7 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
 
     let key_file = fs::File::open(key_path)
         .map_err(|e| miette::miette!("Failed to open key file {:?}: {}", key_path, e))?;
-    let mut key_reader = BufReader::new(key_file);
+    let mut key_reader = StdBufReader::new(key_file);
     let keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
         .map_err(|e| miette::miette!("Failed to read private keys: {}", e))?;
     if keys.is_empty() {
