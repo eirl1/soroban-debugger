@@ -1783,12 +1783,71 @@ pub async fn repl(args: ReplArgs) -> Result<()> {
 
 /// Show budget trend chart
 pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Result<()> {
-    print_info("Budget trend is not yet implemented in this build");
-    if let Some(c) = contract {
-        print_info(format!("Contract: {}", c));
+    let manager = HistoryManager::new()?;
+    let mut records = manager.filter_history(contract, function)?;
+
+    records.sort_by(|a, b| a.date.cmp(&b.date));
+
+    if records.is_empty() {
+        if !Formatter::is_quiet() {
+            println!("Budget Trend");
+            println!(
+                "Filters: contract={} function={}",
+                contract.unwrap_or("*"),
+                function.unwrap_or("*")
+            );
+            println!("No run history found yet.");
+            println!("Tip: run `soroban-debug run ...` a few times to generate history.");
+        }
+        return Ok(());
     }
-    if let Some(f) = function {
-        print_info(format!("Function: {}", f));
+
+    let stats = crate::history::budget_trend_stats(&records).unwrap();
+    let cpu_values: Vec<u64> = records.iter().map(|r| r.cpu_used).collect();
+    let mem_values: Vec<u64> = records.iter().map(|r| r.memory_used).collect();
+
+    if !Formatter::is_quiet() {
+        println!("Budget Trend");
+        println!(
+            "Filters: contract={} function={}",
+            contract.unwrap_or("*"),
+            function.unwrap_or("*")
+        );
+        println!(
+            "Runs: {}   Range: {} -> {}",
+            stats.count, stats.first_date, stats.last_date
+        );
+        println!(
+            "CPU insns: last={}  avg={}  min={}  max={}",
+            crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.last_cpu),
+            crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.cpu_avg),
+            crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.cpu_min),
+            crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.cpu_max),
+        );
+        println!(
+            "Mem bytes: last={}  avg={}  min={}  max={}",
+            crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.last_mem),
+            crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.mem_avg),
+            crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.mem_min),
+            crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.mem_max),
+        );
+        println!();
+        println!("CPU trend: {}", Formatter::sparkline(&cpu_values, 50));
+        println!("MEM trend: {}", Formatter::sparkline(&mem_values, 50));
+
+        if let Some((cpu_reg, mem_reg)) = crate::history::check_regression(&records) {
+            if cpu_reg > 0.0 || mem_reg > 0.0 {
+                println!();
+                println!("Regression warning (last two runs):");
+                if cpu_reg > 0.0 {
+                    println!("  CPU increased by {:.1}%", cpu_reg);
+                }
+                if mem_reg > 0.0 {
+                    println!("  Memory increased by {:.1}%", mem_reg);
+                }
+            }
+        }
     }
-    Err(DebuggerError::ExecutionError("Budget trend not yet implemented".to_string()).into())
+
+    Ok(())
 }

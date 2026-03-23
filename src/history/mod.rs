@@ -140,6 +140,60 @@ pub fn check_regression(records: &[RunHistory]) -> Option<(f64, f64)> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BudgetTrendStats {
+    pub count: usize,
+    pub first_date: String,
+    pub last_date: String,
+    pub cpu_min: u64,
+    pub cpu_avg: u64,
+    pub cpu_max: u64,
+    pub mem_min: u64,
+    pub mem_avg: u64,
+    pub mem_max: u64,
+    pub last_cpu: u64,
+    pub last_mem: u64,
+}
+
+pub fn budget_trend_stats(records: &[RunHistory]) -> Option<BudgetTrendStats> {
+    if records.is_empty() {
+        return None;
+    }
+
+    let mut cpu_min = u64::MAX;
+    let mut cpu_max = 0u64;
+    let mut mem_min = u64::MAX;
+    let mut mem_max = 0u64;
+    let mut cpu_sum: u128 = 0;
+    let mut mem_sum: u128 = 0;
+
+    for r in records {
+        cpu_min = cpu_min.min(r.cpu_used);
+        cpu_max = cpu_max.max(r.cpu_used);
+        mem_min = mem_min.min(r.memory_used);
+        mem_max = mem_max.max(r.memory_used);
+        cpu_sum = cpu_sum.saturating_add(r.cpu_used as u128);
+        mem_sum = mem_sum.saturating_add(r.memory_used as u128);
+    }
+
+    let count = records.len();
+    let last = &records[count - 1];
+
+    Some(BudgetTrendStats {
+        count,
+        first_date: records[0].date.clone(),
+        last_date: last.date.clone(),
+        cpu_min,
+        cpu_avg: (cpu_sum / count as u128) as u64,
+        cpu_max,
+        mem_min,
+        mem_avg: (mem_sum / count as u128) as u64,
+        mem_max,
+        last_cpu: last.cpu_used,
+        last_mem: last.memory_used,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +241,50 @@ mod tests {
         let history = manager.load_history().unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].cpu_used, 1234);
+    }
+
+    #[test]
+    fn budget_trend_stats_empty_returns_none() {
+        assert!(budget_trend_stats(&[]).is_none());
+    }
+
+    #[test]
+    fn budget_trend_stats_computes_min_max_avg_last() {
+        let records = vec![
+            RunHistory {
+                date: "2026-01-01T00:00:00Z".into(),
+                contract_hash: "a".into(),
+                function: "f".into(),
+                cpu_used: 10,
+                memory_used: 100,
+            },
+            RunHistory {
+                date: "2026-01-02T00:00:00Z".into(),
+                contract_hash: "a".into(),
+                function: "f".into(),
+                cpu_used: 30,
+                memory_used: 200,
+            },
+            RunHistory {
+                date: "2026-01-03T00:00:00Z".into(),
+                contract_hash: "a".into(),
+                function: "f".into(),
+                cpu_used: 20,
+                memory_used: 150,
+            },
+        ];
+
+        let stats = budget_trend_stats(&records).unwrap();
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.cpu_min, 10);
+        assert_eq!(stats.cpu_max, 30);
+        assert_eq!(stats.cpu_avg, 20);
+        assert_eq!(stats.mem_min, 100);
+        assert_eq!(stats.mem_max, 200);
+        assert_eq!(stats.mem_avg, 150);
+        assert_eq!(stats.last_cpu, 20);
+        assert_eq!(stats.last_mem, 150);
+        assert_eq!(stats.first_date, "2026-01-01T00:00:00Z");
+        assert_eq!(stats.last_date, "2026-01-03T00:00:00Z");
     }
 }

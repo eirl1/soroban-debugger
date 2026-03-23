@@ -129,6 +129,38 @@ impl BudgetInspector {
             None
         }
     }
+
+    pub fn format_cpu_insns(value: u64) -> String {
+        const K: u64 = 1_000;
+        const M: u64 = 1_000_000;
+        const B: u64 = 1_000_000_000;
+
+        if value >= B {
+            format!("{:.2}B", value as f64 / B as f64)
+        } else if value >= M {
+            format!("{:.2}M", value as f64 / M as f64)
+        } else if value >= K {
+            format!("{:.2}K", value as f64 / K as f64)
+        } else {
+            value.to_string()
+        }
+    }
+
+    pub fn format_memory_bytes(bytes: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = 1024 * KB;
+        const GB: u64 = 1024 * MB;
+
+        if bytes >= GB {
+            format!("{:.2} GB", bytes as f64 / GB as f64)
+        } else if bytes >= MB {
+            format!("{:.2} MB", bytes as f64 / MB as f64)
+        } else if bytes >= KB {
+            format!("{:.2} KB", bytes as f64 / KB as f64)
+        } else {
+            format!("{} B", bytes)
+        }
+    }
 }
 
 /// Severity level for budget warnings
