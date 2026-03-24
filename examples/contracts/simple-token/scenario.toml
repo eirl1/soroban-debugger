@@ -33,3 +33,10 @@ expected_return = "700"
 
 [steps.expected_storage]
 "TotalSupply" = "1000"
+
+# Failure assertion: transferring more than the balance should error
+[[steps]]
+name = "Overdraw Transfer Should Fail"
+function = "transfer"
+args = '["GD726E62Z6XU6KD5J2EPOHG5NQZ5K5I5J5QZQZQZQZQZQZQZQZQZQZQ", "GD826E62Z6XU6KD5J2EPOHG5NQZ5K5I5J5QZQZQZQZQZQZQZQZQZQZQ", 9999]'
+expected_error = "insufficient"

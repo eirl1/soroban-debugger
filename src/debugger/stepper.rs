@@ -132,7 +132,9 @@ impl Stepper {
             }
             StepMode::StepOut => {
                 // Delegate to the instruction pointer which holds the stored target depth
-                debug_state.instruction_pointer().should_pause_at(instruction)
+                debug_state
+                    .instruction_pointer()
+                    .should_pause_at(instruction)
             }
             StepMode::StepBlock => {
                 // Pause at control flow instructions

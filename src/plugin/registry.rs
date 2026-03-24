@@ -102,9 +102,7 @@ pub fn format_global_output(formatter: &str, data: &str) -> PluginResult<Option<
 ///
 /// This function is intentionally free of `LoadedPlugin` so it can be
 /// exercised in unit tests without touching the file system.
-pub(crate) fn toposort_names(
-    entries: &[(String, Vec<String>)],
-) -> (Vec<usize>, Vec<PluginError>) {
+pub(crate) fn toposort_names(entries: &[(String, Vec<String>)]) -> (Vec<usize>, Vec<PluginError>) {
     let n = entries.len();
 
     // Map name → index for O(1) dependency look-up.
@@ -184,12 +182,7 @@ fn toposort_plugins(plugins: Vec<LoadedPlugin>) -> (Vec<LoadedPlugin>, Vec<Plugi
     // Build the name/deps table that `toposort_names` expects.
     let entries: Vec<(String, Vec<String>)> = plugins
         .iter()
-        .map(|p| {
-            (
-                p.manifest().name.clone(),
-                p.manifest().dependencies.clone(),
-            )
-        })
+        .map(|p| (p.manifest().name.clone(), p.manifest().dependencies.clone()))
         .collect();
 
     let (order, errors) = toposort_names(&entries);
@@ -601,12 +594,7 @@ mod tests {
     fn entries(pairs: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
         pairs
             .iter()
-            .map(|(n, ds)| {
-                (
-                    n.to_string(),
-                    ds.iter().map(|d| d.to_string()).collect(),
-                )
-            })
+            .map(|(n, ds)| (n.to_string(), ds.iter().map(|d| d.to_string()).collect()))
             .collect()
     }
 
@@ -665,12 +653,7 @@ mod tests {
     #[test]
     fn toposort_diamond_dependency() {
         // Worst discovery: D, C, B, A
-        let names = sorted_names(&[
-            ("d", &["b", "c"]),
-            ("c", &["a"]),
-            ("b", &["a"]),
-            ("a", &[]),
-        ]);
+        let names = sorted_names(&[("d", &["b", "c"]), ("c", &["a"]), ("b", &["a"]), ("a", &[])]);
         let pos = |n: &str| names.iter().position(|x| x == n).unwrap();
         assert!(pos("a") < pos("b"), "a before b");
         assert!(pos("a") < pos("c"), "a before c");

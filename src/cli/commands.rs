@@ -202,17 +202,20 @@ fn display_mock_call_log(calls: &[crate::runtime::executor::MockCallEntry]) {
 
 /// Execute batch mode with parallel execution
 fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
-    let contract = args.contract.as_ref().expect("contract is required for batch mode");
-    let function = args.function.as_ref().expect("function is required for batch mode");
+    let contract = args
+        .contract
+        .as_ref()
+        .expect("contract is required for batch mode");
+    let function = args
+        .function
+        .as_ref()
+        .expect("function is required for batch mode");
 
     print_info(format!("Loading contract: {:?}", contract));
     logging::log_loading_contract(&contract.to_string_lossy());
 
     let wasm_bytes = fs::read(contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file at {:?}: {}",
-            contract, e
-        ))
+        DebuggerError::WasmLoadError(format!("Failed to read WASM file at {:?}: {}", contract, e))
     })?;
 
     print_success(format!(
@@ -297,8 +300,14 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         return run_dry_run(&args);
     }
 
-    let contract = args.contract.as_ref().expect("contract is required for run");
-    let function = args.function.as_ref().expect("function is required for run");
+    let contract = args
+        .contract
+        .as_ref()
+        .expect("contract is required for run");
+    let function = args
+        .function
+        .as_ref()
+        .expect("function is required for run");
 
     print_info(format!("Loading contract: {:?}", contract));
     output_writer.write(&format!("Loading contract: {:?}", contract))?;
@@ -812,7 +821,10 @@ fn build_execution_trace(
 
 /// Execute run command in dry-run mode.
 fn run_dry_run(args: &RunArgs) -> Result<()> {
-    let contract = args.contract.as_ref().expect("contract is required for dry-run");
+    let contract = args
+        .contract
+        .as_ref()
+        .expect("contract is required for dry-run");
     print_info(format!("[DRY RUN] Loading contract: {:?}", contract));
 
     let wasm_file = crate::utils::wasm::load_wasm(contract)

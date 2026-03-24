@@ -24,6 +24,10 @@ pub struct ScenarioStep {
     pub expected_storage: Option<HashMap<String, String>>,
     pub expected_events: Option<Vec<ScenarioEventAssertion>>,
     pub budget_limits: Option<ScenarioBudgetAssertion>,
+    /// When set, the step is expected to fail with an error message containing this substring.
+    pub expected_error: Option<String>,
+    /// When set, the step is expected to panic with a message containing this substring.
+    pub expected_panic: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -104,34 +108,88 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
         let result = engine.execute(&step.function, parsed_args.as_deref());
 
         let mut step_passed = true;
+        let expects_failure = step.expected_error.is_some() || step.expected_panic.is_some();
 
         match result {
             Ok(res) => {
-                println!("  Result: {}", res);
-                if let Some(expected) = &step.expected_return {
-                    if res.trim() == expected.trim() {
+                if expects_failure {
+                    // Step was expected to fail, but it succeeded — that's a test failure.
+                    println!(
+                        "  {}",
+                        Formatter::error(format!(
+                            "✗ Step succeeded with '{}', but was expected to fail",
+                            res
+                        ))
+                    );
+                    step_passed = false;
+                } else {
+                    println!("  Result: {}", res);
+                    if let Some(expected) = &step.expected_return {
+                        if res.trim() == expected.trim() {
+                            println!(
+                                "  {}",
+                                Formatter::success("✓ Return value assertion passed")
+                            );
+                        } else {
+                            println!(
+                                "  {}",
+                                Formatter::error(format!(
+                                    "✗ Return value assertion failed! Expected '{}', got '{}'",
+                                    expected, res
+                                ))
+                            );
+                            step_passed = false;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let err_msg = format!("{}", e);
+                if let Some(expected_error) = &step.expected_error {
+                    if err_msg.contains(expected_error.as_str()) {
                         println!(
                             "  {}",
-                            Formatter::success("✓ Return value assertion passed")
+                            Formatter::success(format!(
+                                "✓ Expected error assertion passed (matched '{}')",
+                                expected_error
+                            ))
                         );
                     } else {
                         println!(
                             "  {}",
                             Formatter::error(format!(
-                                "✗ Return value assertion failed! Expected '{}', got '{}'",
-                                expected, res
+                                "✗ Expected error '{}', but got '{}'",
+                                expected_error, err_msg
                             ))
                         );
                         step_passed = false;
                     }
+                } else if let Some(expected_panic) = &step.expected_panic {
+                    if err_msg.contains(expected_panic.as_str()) {
+                        println!(
+                            "  {}",
+                            Formatter::success(format!(
+                                "✓ Expected panic assertion passed (matched '{}')",
+                                expected_panic
+                            ))
+                        );
+                    } else {
+                        println!(
+                            "  {}",
+                            Formatter::error(format!(
+                                "✗ Expected panic '{}', but got '{}'",
+                                expected_panic, err_msg
+                            ))
+                        );
+                        step_passed = false;
+                    }
+                } else {
+                    println!(
+                        "  {}",
+                        Formatter::error(format!("✗ Execution failed: {}", e))
+                    );
+                    step_passed = false;
                 }
-            }
-            Err(e) => {
-                println!(
-                    "  {}",
-                    Formatter::error(format!("✗ Execution failed: {}", e))
-                );
-                step_passed = false;
             }
         }
 
@@ -341,6 +399,8 @@ mod tests {
         assert!(scenario.steps[0].expected_storage.is_none());
         assert!(scenario.steps[0].expected_events.is_none());
         assert!(scenario.steps[0].budget_limits.is_none());
+        assert!(scenario.steps[0].expected_error.is_none());
+        assert!(scenario.steps[0].expected_panic.is_none());
 
         assert_eq!(scenario.steps[1].name.as_deref(), Some("Get Counter"));
         assert_eq!(scenario.steps[1].function, "get");
@@ -371,6 +431,59 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("1")
         );
+    }
+
+    #[test]
+    fn test_expected_error_deserialization() {
+        let toml_str = r#"
+            [[steps]]
+            name = "Should fail"
+            function = "bad_fn"
+            expected_error = "unauthorized"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps.len(), 1);
+        assert_eq!(
+            scenario.steps[0].expected_error.as_deref(),
+            Some("unauthorized")
+        );
+        assert!(scenario.steps[0].expected_panic.is_none());
+        assert!(scenario.steps[0].expected_return.is_none());
+    }
+
+    #[test]
+    fn test_expected_panic_deserialization() {
+        let toml_str = r#"
+            [[steps]]
+            name = "Should panic"
+            function = "panic_fn"
+            expected_panic = "index out of bounds"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps.len(), 1);
+        assert_eq!(
+            scenario.steps[0].expected_panic.as_deref(),
+            Some("index out of bounds")
+        );
+        assert!(scenario.steps[0].expected_error.is_none());
+    }
+
+    #[test]
+    fn test_backward_compat_no_error_fields() {
+        let toml_str = r#"
+            [[steps]]
+            function = "increment"
+            args = "[]"
+            expected_return = "1"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps.len(), 1);
+        assert!(scenario.steps[0].expected_error.is_none());
+        assert!(scenario.steps[0].expected_panic.is_none());
+        assert_eq!(scenario.steps[0].expected_return.as_deref(), Some("1"));
     }
 
     #[test]

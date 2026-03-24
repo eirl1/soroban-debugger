@@ -9,9 +9,9 @@ use crate::ui::formatter::Formatter;
 use crate::Result;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::history::FileHistory;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
+use rustyline::history::FileHistory;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Context, Editor, Helper};
 use std::path::PathBuf;
@@ -95,10 +95,7 @@ impl Hinter for ReplHelper {
 impl Highlighter for ReplHelper {}
 
 impl Validator for ReplHelper {
-    fn validate(
-        &self,
-        _ctx: &mut ValidationContext<'_>,
-    ) -> rustyline::Result<ValidationResult> {
+    fn validate(&self, _ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
         Ok(ValidationResult::Valid(None))
     }
 }

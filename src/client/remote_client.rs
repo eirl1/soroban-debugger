@@ -5,6 +5,7 @@ use std::net::TcpStream;
 use tracing::info;
 
 /// Remote client for connecting to a debug server
+#[derive(Debug)]
 pub struct RemoteClient {
     stream: BufReader<TcpStream>,
     message_id: u64,

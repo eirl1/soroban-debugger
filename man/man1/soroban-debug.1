@@ -4,7 +4,7 @@
 .SH NAME
 soroban\-debug \- A debugger for Soroban smart contracts
 .SH SYNOPSIS
-\fBsoroban\-debug\fR [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-banner\fR] [\fB\-\-budget\-trend\fR] [\fB\-\-trend\-contract\fR] [\fB\-\-trend\-function\fR] [\fB\-\-version\-verbose\fR] [\fB\-\-list\-functions\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBsoroban\-debug\fR [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-banner\fR] [\fB\-\-history\-file\fR] [\fB\-\-budget\-trend\fR] [\fB\-\-trend\-contract\fR] [\fB\-\-trend\-function\fR] [\fB\-\-version\-verbose\fR] [\fB\-\-list\-functions\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 A debugger for Soroban smart contracts
 .SH OPTIONS
@@ -17,6 +17,14 @@ Show verbose output including internal details
 .TP
 \fB\-\-no\-banner\fR
 Suppress startup banner output
+.TP
+\fB\-\-history\-file\fR \fI<FILE>\fR
+Override the history file location (useful for CI, sandboxes, and per\-project isolation)
+
+Equivalent to setting `SOROBAN_DEBUG_HISTORY_FILE`.
+.RS
+May also be specified with the \fBSOROBAN_DEBUG_HISTORY_FILE\fR environment variable. 
+.RE
 .TP
 \fB\-\-budget\-trend\fR
 Show historical budget trend visualization
@@ -34,7 +42,7 @@ Show detailed version information
 Show exported functions for a given contract (shorthand for inspect \-\-functions)
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 \fB\-V\fR, \fB\-\-version\fR
 Print version

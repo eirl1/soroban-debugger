@@ -259,6 +259,93 @@ max_cpu_instructions = 0
 }
 
 #[test]
+fn scenario_passes_when_expected_error_matches() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    // Assuming `decrement` isn't a valid function and will fail
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Should fail and match"
+function = "decrement"
+expected_error = "Invalid function name"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Expected error assertion passed"));
+}
+
+#[test]
+fn scenario_fails_when_expected_error_mismatches() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Should error with wrong message"
+function = "decrement"
+expected_error = "Totally different error"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Expected error 'Totally different error', but got",
+        ));
+}
+
+#[test]
+fn scenario_fails_when_expected_to_fail_but_succeeds() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Should fail but succeeds"
+function = "increment"
+expected_error = "unauthorized"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Step succeeded with"));
+}
+
+#[test]
 fn repl_accepts_commands_and_exits() {
     let wasm = fixture_wasm("counter");
     let output = Command::new(env!("CARGO_BIN_EXE_soroban-debug"))

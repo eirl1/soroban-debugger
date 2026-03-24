@@ -543,26 +543,21 @@ impl DebugServer {
                                     }
                                 } else {
                                     // Try matching built-in state fields
-                                    let state_result =
-                                        engine.state().lock().ok().and_then(|state| {
-                                            match expression.as_str() {
-                                                "function" | "current_function" => {
-                                                    state.current_function().map(|f| {
-                                                        (f.to_string(), "string".to_string())
-                                                    })
-                                                }
-                                                "args" | "arguments" => {
-                                                    state.current_args().map(|a| {
-                                                        (a.to_string(), "string".to_string())
-                                                    })
-                                                }
-                                                "step_count" | "steps" => Some((
-                                                    state.step_count().to_string(),
-                                                    "number".to_string(),
-                                                )),
-                                                _ => None,
-                                            }
-                                        });
+                                    let state_result = engine.state().lock().ok().and_then(
+                                        |state| match expression.as_str() {
+                                            "function" | "current_function" => state
+                                                .current_function()
+                                                .map(|f| (f.to_string(), "string".to_string())),
+                                            "args" | "arguments" => state
+                                                .current_args()
+                                                .map(|a| (a.to_string(), "string".to_string())),
+                                            "step_count" | "steps" => Some((
+                                                state.step_count().to_string(),
+                                                "number".to_string(),
+                                            )),
+                                            _ => None,
+                                        },
+                                    );
 
                                     match state_result {
                                         Some((result, result_type)) => {
@@ -584,10 +579,7 @@ impl DebugServer {
                                 }
                             }
                             Err(e) => DebugResponse::Error {
-                                message: format!(
-                                    "Failed to access storage for evaluation: {}",
-                                    e
-                                ),
+                                message: format!("Failed to access storage for evaluation: {}", e),
                             },
                         }
                     }

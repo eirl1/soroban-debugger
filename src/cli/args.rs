@@ -676,8 +676,16 @@ mod tests {
 
     #[test]
     fn run_server_mode_does_not_require_contract_or_function() {
-        let cli = Cli::try_parse_from(["soroban-debug", "run", "--server", "-p", "8888", "-t", "secret"])
-            .expect("failed to parse run --server");
+        let cli = Cli::try_parse_from([
+            "soroban-debug",
+            "run",
+            "--server",
+            "-p",
+            "8888",
+            "-t",
+            "secret",
+        ])
+        .expect("failed to parse run --server");
 
         let Commands::Run(args) = cli.command.expect("run command expected") else {
             panic!("run command expected");

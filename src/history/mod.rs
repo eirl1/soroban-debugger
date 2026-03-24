@@ -177,7 +177,7 @@ impl HistoryManager {
         // A corrupt or truncated file must not be treated as an empty history.
         // Doing so would cause `append_record` to overwrite the file with a
         // single-record list, destroying all salvageable data.
-        serde_json::from_reader(reader).map_err(|e| {
+        let history: Vec<RunHistory> = serde_json::from_reader(reader).map_err(|e| {
             DebuggerError::FileError(format!(
                 "History file {:?} could not be parsed ({}). \
                  The file may be corrupt or was written by an incompatible version. \
@@ -185,13 +185,10 @@ impl HistoryManager {
                  \x20 1. Inspect the file with `cat {:?}` and fix any JSON syntax errors.\n\
                  \x20 2. Back up and remove the file (`mv {:?} {:?}.bak`) to start fresh.\n\
                  \x20 3. Restore from a previous backup if one exists.",
-                self.file_path,
-                e,
-                self.file_path,
-                self.file_path,
-                self.file_path,
+                self.file_path, e, self.file_path, self.file_path, self.file_path,
             ))
-        })
+        })?;
+        Ok(history)
     }
 
     /// Append a new record optimizing with BufWriter.
@@ -220,7 +217,7 @@ impl HistoryManager {
                 tmp_path, e
             ))
         })?;
-        if let Some(file) = writer.into_inner().ok() {
+        if let Ok(file) = writer.into_inner() {
             let _ = file.sync_all();
         }
 
@@ -479,9 +476,12 @@ mod tests {
         let has_guidance = msg.contains("bak")      // backup suggestion
             || msg.contains("fix")                  // fix-in-place suggestion
             || msg.contains("Inspect")              // inspect suggestion
-            || msg.contains("Recovery");            // recovery header
+            || msg.contains("Recovery"); // recovery header
 
-        assert!(has_guidance, "error must include recovery guidance; got: {msg}");
+        assert!(
+            has_guidance,
+            "error must include recovery guidance; got: {msg}"
+        );
     }
 
     /// A truncated (partial write) JSON array must also be treated as corrupt
@@ -506,7 +506,8 @@ mod tests {
     #[test]
     fn load_history_wrong_json_type_returns_error() {
         let mut tmp = NamedTempFile::new().unwrap();
-        tmp.write_all(b"{\"date\":\"2026\",\"cpu_used\":1}").unwrap();
+        tmp.write_all(b"{\"date\":\"2026\",\"cpu_used\":1}")
+            .unwrap();
         tmp.flush().unwrap();
 
         let manager = HistoryManager::with_path(tmp.path().to_path_buf());
@@ -570,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_regression_detection() {
-        let p1 = make_record("prev", 1000, 1000);
+        let p1 = make_record("2026-01-01T00:00:00Z", 1000, 1000);
         let p2 = RunHistory {
             date: "2026-01-02T00:00:00Z".into(),
             contract_hash: "hash".into(),
@@ -589,10 +590,10 @@ mod tests {
 
     #[test]
     fn test_persistence_logic() {
-        let temp = NamedTempFile::new().unwrap();
-        let manager = HistoryManager::with_path(temp.path().to_path_buf());
+        let temp = tempfile::tempdir().unwrap();
+        let manager = HistoryManager::with_path(temp.path().join("history.json"));
 
-        let record = make_record("date", 1234, 5678);
+        let record = make_record("2026-01-01T00:00:00Z", 1234, 5678);
         manager.append_record(record).unwrap();
         let history = manager.load_history().unwrap();
         assert_eq!(history.len(), 1);
