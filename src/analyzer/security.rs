@@ -340,24 +340,44 @@ impl SecurityRule for AuthorizationCheckRule {
         trace: &[DynamicTraceEvent]
     ) -> Result<Vec<SecurityFinding>> {
         let mut findings = Vec::new();
-        let mut auth_seen = false;
-        let mut storage_write_seen = false;
+        let mut auth_sequence = None;
+        let mut problematic_storage_writes = Vec::new();
 
+        // First pass: find the earliest authorization event and any storage writes before it
         for entry in trace {
             if entry.kind == DynamicTraceEventKind::Authorization {
-                auth_seen = true;
-            }
-            if entry.kind == DynamicTraceEventKind::StorageWrite {
-                storage_write_seen = true;
+                // Record the earliest authorization event
+                match auth_sequence {
+                    None => auth_sequence = Some(entry.sequence),
+                    Some(current_auth_seq) => {
+                        if entry.sequence < current_auth_seq {
+                            auth_sequence = Some(entry.sequence);
+                        }
+                    }
+                }
+            } else if entry.kind == DynamicTraceEventKind::StorageWrite {
+                // Check if this storage write happens before any authorization
+                if let Some(auth_seq) = auth_sequence {
+                    if entry.sequence < auth_seq {
+                        problematic_storage_writes.push(entry.sequence);
+                    }
+                } else {
+                    // No auth seen yet, this storage write is problematic
+                    problematic_storage_writes.push(entry.sequence);
+                }
             }
         }
 
-        if storage_write_seen && !auth_seen {
+        // If we have storage writes without preceding auth, report a finding
+        if !problematic_storage_writes.is_empty() {
             findings.push(SecurityFinding {
                 rule_id: self.name().to_string(),
                 severity: Severity::High,
                 location: "Dynamic trace".to_string(),
-                description: "Storage mutation detected without an authorization event in the execution trace.".to_string(),
+                description: format!(
+                    "Storage mutation detected without preceding authorization. Found {} storage write(s) occurring before any authorization event.",
+                    problematic_storage_writes.len()
+                ),
                 remediation: "Ensure all sensitive functions call `address.require_auth()` before mutating state.".to_string(),
                 confidence: None,
                 context: None,
@@ -1359,5 +1379,144 @@ mod tests {
         assert!(!is_storage_read_import("not_env", "storage_get"));
         assert!(!is_storage_read_import("mylib", "storage_get"));
         assert!(!is_storage_read_import("environments", "storage_get"));
+    }
+
+    // -----------------------------------------------------------------------
+    // AuthorizationCheckRule — dynamic trace tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auth_rule_detects_storage_before_auth() {
+        let rule = AuthorizationCheckRule;
+        
+        // Test case: storage write happens before authorization
+        let trace = vec![
+            DynamicTraceEvent {
+                sequence: 0,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write key1".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: Some("key1".to_string()),
+                storage_value: Some("value1".to_string()),
+                call_depth: 0,
+            },
+            DynamicTraceEvent {
+                sequence: 1,
+                kind: DynamicTraceEventKind::Authorization,
+                message: "auth check".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: None,
+                storage_value: None,
+                call_depth: 0,
+            },
+        ];
+
+        let findings = rule.analyze_dynamic(None, &trace).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "missing-auth");
+        assert!(findings[0].description.contains("1 storage write(s) occurring before any authorization event"));
+    }
+
+    #[test]
+    fn auth_rule_allows_storage_after_auth() {
+        let rule = AuthorizationCheckRule;
+        
+        // Test case: authorization happens before storage write (should be OK)
+        let trace = vec![
+            DynamicTraceEvent {
+                sequence: 0,
+                kind: DynamicTraceEventKind::Authorization,
+                message: "auth check".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: None,
+                storage_value: None,
+                call_depth: 0,
+            },
+            DynamicTraceEvent {
+                sequence: 1,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write key1".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: Some("key1".to_string()),
+                storage_value: Some("value1".to_string()),
+                call_depth: 0,
+            },
+        ];
+
+        let findings = rule.analyze_dynamic(None, &trace).unwrap();
+        assert_eq!(findings.len(), 0);
+    }
+
+    #[test]
+    fn auth_rule_detects_multiple_storage_before_auth() {
+        let rule = AuthorizationCheckRule;
+        
+        // Test case: multiple storage writes happen before authorization
+        let trace = vec![
+            DynamicTraceEvent {
+                sequence: 0,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write key1".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: Some("key1".to_string()),
+                storage_value: Some("value1".to_string()),
+                call_depth: 0,
+            },
+            DynamicTraceEvent {
+                sequence: 1,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write key2".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: Some("key2".to_string()),
+                storage_value: Some("value2".to_string()),
+                call_depth: 0,
+            },
+            DynamicTraceEvent {
+                sequence: 2,
+                kind: DynamicTraceEventKind::Authorization,
+                message: "auth check".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: None,
+                storage_value: None,
+                call_depth: 0,
+            },
+        ];
+
+        let findings = rule.analyze_dynamic(None, &trace).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "missing-auth");
+        assert!(findings[0].description.contains("2 storage write(s) occurring before any authorization event"));
+    }
+
+    #[test]
+    fn auth_rule_detects_storage_without_any_auth() {
+        let rule = AuthorizationCheckRule;
+        
+        // Test case: storage writes with no authorization at all
+        let trace = vec![
+            DynamicTraceEvent {
+                sequence: 0,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write key1".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: Some("key1".to_string()),
+                storage_value: Some("value1".to_string()),
+                call_depth: 0,
+            },
+            DynamicTraceEvent {
+                sequence: 1,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write key2".to_string(),
+                function: Some("test_function".to_string()),
+                storage_key: Some("key2".to_string()),
+                storage_value: Some("value2".to_string()),
+                call_depth: 0,
+            },
+        ];
+
+        let findings = rule.analyze_dynamic(None, &trace).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "missing-auth");
+        assert!(findings[0].description.contains("2 storage write(s) occurring before any authorization event"));
     }
 }
