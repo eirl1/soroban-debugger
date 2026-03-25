@@ -5,8 +5,13 @@ import {
   ExitedEvent} from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
 import * as readline from 'readline';
-import { DebuggerProcess, DebuggerProcessConfig } from '../cli/debuggerProcess';
-import { DebuggerState, Variable } from './protocol';
+import {
+  DebuggerProcess,
+  DebuggerProcessConfig,
+  DebuggerTimeoutError,
+  validateLaunchConfig
+} from '../cli/debuggerProcess';
+import { BreakpointCapabilities, BreakpointLocation, DebuggerState, Variable } from './protocol';
 import { VariableStore } from './variableStore';
 import { ResolvedBreakpoint, resolveSourceBreakpoints } from './sourceBreakpoints';
 import { LogOutputEvent, LogLevel } from '@vscode/debugadapter/lib/logger';
@@ -34,6 +39,27 @@ export class SorobanDebugSession extends DebugSession {
   private requestAbortControllers = new Map<number, AbortController>();
   private refreshAbortController: AbortController | null = null;
   private refreshGeneration = 0;
+  private backendCapabilities: BreakpointCapabilities = {
+    conditionalBreakpoints: false,
+    hitConditionalBreakpoints: false,
+    logPoints: false
+  };
+
+  constructor(
+    obsoleteDebuggerLinesAndColumnsStartAt1?: boolean | LogManager,
+    obsoleteIsServer?: boolean
+  ) {
+    super(
+      typeof obsoleteDebuggerLinesAndColumnsStartAt1 === 'boolean'
+        ? obsoleteDebuggerLinesAndColumnsStartAt1
+        : undefined,
+      obsoleteIsServer
+    );
+
+    if (obsoleteDebuggerLinesAndColumnsStartAt1 && typeof obsoleteDebuggerLinesAndColumnsStartAt1 !== 'boolean') {
+      this.logManager = obsoleteDebuggerLinesAndColumnsStartAt1;
+    }
+  }
 
   protected initializeRequest(
     response: DebugProtocol.InitializeResponse,
@@ -115,13 +141,44 @@ export class SorobanDebugSession extends DebugSession {
     const lines = breakpoints.map((bp) => bp.line);
 
     try {
-      const resolved: ResolvedBreakpoint[] = this.debuggerProcess && source
-        ? resolveSourceBreakpoints(source, lines, this.exportedFunctions)
-        : lines.map((line) => ({
-            line,
-            verified: false,
-            message: 'Debugger is not launched or source path is unavailable'
+      let resolved: ResolvedBreakpoint[];
+      if (!this.debuggerProcess || !source) {
+        resolved = lines.map((line) => ({
+          requestedLine: line,
+          line,
+          verified: false,
+          reasonCode: 'NO_DEBUGGER',
+          setBreakpoint: false,
+          message: 'Debugger is not launched or source path is unavailable'
+        }));
+      } else {
+        let serverResolved: Array<{ requestedLine: number; line: number; verified: boolean; functionName?: string; reasonCode: string; message: string }> | null = null;
+        try {
+          serverResolved = await this.debuggerProcess.resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+        } catch {
+          serverResolved = null;
+        }
+
+        const shouldFallbackHeuristic = serverResolved
+          ? serverResolved.every((bp) => ['NO_DEBUG_INFO', 'FILE_NOT_IN_DEBUG_INFO', 'WASM_PARSE_ERROR'].includes(bp.reasonCode))
+          : false;
+
+        if (serverResolved && shouldFallbackHeuristic) {
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+        } else if (serverResolved) {
+          resolved = serverResolved.map((bp) => ({
+            requestedLine: bp.requestedLine,
+            line: bp.line,
+            verified: bp.verified,
+            functionName: bp.functionName,
+            reasonCode: bp.reasonCode,
+            message: bp.message,
+            setBreakpoint: bp.verified && Boolean(bp.functionName)
           }));
+        } else {
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+        }
+      }
 
       const managedBreakpoints: BreakpointLocation[] = breakpoints.map((bp, index) => {
         const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.line === bp.line);
@@ -149,21 +206,18 @@ export class SorobanDebugSession extends DebugSession {
       this.sourceFunctionBreakpoints.set(
         source,
         new Set(
-          managedBreakpoints
-            .filter((bp) => Boolean(bp.functionName) && !syncErrors.has(bp.id))
+          resolved
+            .filter((bp) => bp.setBreakpoint && bp.functionName)
             .map((bp) => bp.functionName as string)
         )
       );
 
       response.body = {
         breakpoints: breakpoints.map((bp) => {
-          const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.line === bp.line);
-          const managed = managedBreakpoints.find((candidate) => candidate.line === bp.line);
-          const capabilityMessages = this.describeCapabilityFallback(bp);
-          const syncMessage = managed ? syncErrors.get(managed.id) : undefined;
+          const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.requestedLine === bp.line);
           return {
-            verified: (match?.verified ?? false) && !syncMessage,
-            line: bp.line,
+            verified: match?.verified ?? false,
+            line: match?.line ?? bp.line,
             column: bp.column,
             source: args.source,
             message: [match?.message, syncMessage, capabilityMessages].filter(Boolean).join(' ')
@@ -280,9 +334,7 @@ export class SorobanDebugSession extends DebugSession {
       }
 
       if (expression === 'storage' || expression === 'Storage') {
-        const storageObject = Object.fromEntries(
-          (this.state.variables || []).map((v) => [v.name, v.value])
-        );
+        const storageObject = this.state.storage || {};
         response.body = {
           result: JSON.stringify(storageObject),
           variablesReference: 0
@@ -293,12 +345,12 @@ export class SorobanDebugSession extends DebugSession {
 
       if (expression.startsWith('storage.')) {
         const key = expression.slice('storage.'.length);
-        const match = (this.state.variables || []).find((v) => v.name === key);
-        if (!match) {
+        const storageValue = (this.state.storage || {})[key];
+        if (storageValue === undefined) {
           throw new Error(`Unknown storage key: ${key}`);
         }
         response.body = {
-          result: match.value,
+          result: typeof storageValue === 'string' ? storageValue : JSON.stringify(storageValue),
           variablesReference: 0
         };
         this.sendResponse(response);
@@ -427,26 +479,18 @@ export class SorobanDebugSession extends DebugSession {
     args: DebugProtocol.ConfigurationDoneArguments
   ): Promise<void> {
     try {
-      const requestSeq = (response as any).request_seq as number | undefined;
-      const controller = new AbortController();
-      if (typeof requestSeq === 'number') {
-        this.requestAbortControllers.set(requestSeq, controller);
+      this.sendResponse(response);
+
+      if (!this.debuggerProcess || this.hasExecuted) {
+        return;
       }
 
-      const result = await this.debuggerProcess.evaluate(args.expression, args.frameId, {
-        signal: controller.signal
-      });
-      response.body = {
-        result: result.result,
-        type: result.type,
-        variablesReference: result.variablesReference
-      };
-      this.sendResponse(response);
+      await this.runExecution('entry');
     } catch (error) {
       if ((error as any)?.name === 'AbortError' || (error as any)?.name === 'TimeoutError') {
         this.sendErrorResponse(response, {
           id: 1006,
-          format: 'Evaluation canceled',
+          format: 'Configuration completion canceled',
           showUser: false
         });
         return;
@@ -534,7 +578,7 @@ export class SorobanDebugSession extends DebugSession {
 
     if (result.paused) {
       this.state.isPaused = true;
-      this.sendEvent(new StoppedEvent('breakpoint', this.threadId));
+      this.sendEvent(new StoppedEvent(reason, this.threadId));
       return;
     }
 
@@ -661,13 +705,13 @@ export class SorobanDebugSession extends DebugSession {
       return;
     }
 
-    this.state.callStack = inspection.callStack.map((frame, index) => {
+      this.state.callStack = inspection.callStack.map((frame, index) => {
       let sourcePath = frame;
       let line = 1;
 
       // Try to find the range for the function to resolve the actual source line
       for (const [sourceFilePath, sourceBpSet] of this.sourceFunctionBreakpoints.entries()) {
-        if (sourceBpSet.has(frame) || sourceFilePath) {
+        if (sourceBpSet.has(frame)) {
           sourcePath = sourceFilePath;
           try {
             const { parseFunctionRanges } = require('./sourceBreakpoints');

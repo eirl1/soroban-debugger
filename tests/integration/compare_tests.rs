@@ -97,7 +97,7 @@ fn test_compare_pipeline_storage_diff() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
 
     // fee_pool is only in B
     assert!(report.storage_diff.only_in_b.contains_key("fee_pool"));
@@ -115,7 +115,7 @@ fn test_compare_pipeline_budget_delta() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
 
     assert_eq!(report.budget_diff.cpu_delta, Some(-7000));
     assert_eq!(report.budget_diff.memory_delta, Some(-1360));
@@ -129,7 +129,7 @@ fn test_compare_pipeline_return_value_mismatch() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
     assert!(!report.return_value_diff.equal);
 }
 
@@ -141,7 +141,7 @@ fn test_compare_pipeline_flow_diff() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
     assert!(!report.flow_diff.identical);
 }
 
@@ -153,7 +153,7 @@ fn test_compare_pipeline_event_diff() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
     assert!(!report.event_diff.identical);
 }
 
@@ -165,7 +165,7 @@ fn test_compare_identical_traces() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
 
     assert!(report.storage_diff.only_in_a.is_empty());
     assert!(report.storage_diff.only_in_b.is_empty());
@@ -183,7 +183,7 @@ fn test_render_report_contains_sections() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
     let text = CompareEngine::render_report(&report);
 
     assert!(text.contains("Storage Changes"));
@@ -206,7 +206,7 @@ fn test_compare_empty_traces() {
     let a = ExecutionTrace::from_file(fa.path()).unwrap();
     let b = ExecutionTrace::from_file(fb.path()).unwrap();
 
-    let report = CompareEngine::compare(&a, &b);
+    let report = CompareEngine::compare(&a, &b, 1);
 
     assert!(report.storage_diff.only_in_a.is_empty());
     assert!(report.storage_diff.only_in_b.is_empty());

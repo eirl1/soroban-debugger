@@ -11,6 +11,6 @@ pub use breakpoint::BreakpointManager;
 pub use engine::DebuggerEngine;
 pub use error_db::{ErrorDatabase, ErrorExplanation};
 pub use instruction_pointer::{InstructionPointer, StepMode};
-pub use source_map::{SourceLocation, SourceMap};
+pub use source_map::{SourceBreakpointResolution, SourceLocation, SourceMap};
 pub use state::DebugState;
 pub use stepper::Stepper;

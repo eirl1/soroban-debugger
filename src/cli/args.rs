@@ -95,6 +95,31 @@ pub struct Cli {
     )]
     pub history_file: Option<PathBuf>,
 
+    /// Maximum number of history records to retain.
+    ///
+    /// When set, the oldest records are dropped after each appended run so the
+    /// file never exceeds N entries.  Equivalent to setting
+    /// `SOROBAN_DEBUG_HISTORY_MAX_RECORDS`.
+    #[arg(
+        long,
+        global = true,
+        env = "SOROBAN_DEBUG_HISTORY_MAX_RECORDS",
+        value_name = "N"
+    )]
+    pub history_max_records: Option<usize>,
+
+    /// Drop history records older than N days.
+    ///
+    /// Applied on every append and when running `history prune`.  Equivalent
+    /// to setting `SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS`.
+    #[arg(
+        long,
+        global = true,
+        env = "SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS",
+        value_name = "DAYS"
+    )]
+    pub history_max_age_days: Option<u64>,
+
     /// Show historical budget trend visualization
     #[arg(long)]
     pub budget_trend: bool,
@@ -106,6 +131,18 @@ pub struct Cli {
     /// Filter budget trend by function name
     #[arg(long)]
     pub trend_function: Option<String>,
+
+    /// Regression threshold percentage for `--budget-trend` warnings
+    #[arg(long, default_value_t = 10.0, value_name = "PCT")]
+    pub trend_regression_threshold_pct: f64,
+
+    /// Lookback window (number of runs) for `--budget-trend` regression detection
+    #[arg(long, default_value_t = 2, value_name = "N")]
+    pub trend_regression_lookback: usize,
+
+    /// Smoothing window (moving average) for `--budget-trend` regression detection (1 disables smoothing)
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub trend_regression_smoothing: usize,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -182,6 +219,9 @@ pub enum Commands {
     /// Run a multi-step scenario from a TOML file
     Scenario(ScenarioArgs),
 
+    /// Prune or compact run history according to a retention policy
+    HistoryPrune(HistoryPruneArgs),
+
     /// Plugin-provided subcommand (loaded at runtime)
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -190,7 +230,7 @@ pub enum Commands {
 #[derive(Parser)]
 pub struct RunArgs {
     /// Path to the contract WASM file
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
     pub contract: Option<PathBuf>,
 
     /// Deprecated: use --contract instead
@@ -198,7 +238,7 @@ pub struct RunArgs {
     pub wasm: Option<PathBuf>,
 
     /// Function name to execute
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
     pub function: Option<String>,
 
     /// Function arguments as JSON array (e.g., '["arg1", "arg2"]')
@@ -526,6 +566,10 @@ pub struct InspectArgs {
     #[arg(long)]
     pub metadata: bool,
 
+    /// Output format: pretty (default) or json
+    #[arg(long, value_enum, default_value = "pretty")]
+    pub format: OutputFormat,
+
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
@@ -755,6 +799,85 @@ mod tests {
         assert_eq!(args.path_cap, Some(200));
         assert_eq!(args.timeout, Some(45));
     }
+
+    #[test]
+    fn symbolic_accepts_seed_flag() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--seed",
+            "42",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.seed, Some(42));
+        assert_eq!(args.replay, None);
+    }
+
+    #[test]
+    fn symbolic_accepts_replay_flag() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--replay",
+            "99",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.replay, Some(99));
+        assert_eq!(args.seed, None);
+    }
+
+    #[test]
+    fn symbolic_seed_and_replay_conflict() {
+        let result = Cli::try_parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--seed",
+            "1",
+            "--replay",
+            "2",
+        ]);
+
+        assert!(result.is_err(), "--seed and --replay should be mutually exclusive");
+    }
+
+    #[test]
+    fn symbolic_no_seed_or_replay_defaults_to_none() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.seed, None);
+        assert_eq!(args.replay, None);
+    }
 }
 
 #[derive(Parser)]
@@ -770,6 +893,10 @@ pub struct CompareArgs {
     /// Output file for the comparison report (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Number of context lines to show around the first divergence
+    #[arg(short = 'C', long, default_value_t = 3)]
+    pub context: usize,
 }
 
 /// Arguments for the TUI dashboard subcommand
@@ -825,9 +952,26 @@ pub struct ProfileArgs {
     /// Initial storage state as JSON object
     #[arg(short, long)]
     pub storage: Option<String>,
+
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
+
+    /// Export flame graph as SVG file
+    #[arg(long)]
+    pub flamegraph: Option<PathBuf>,
+
+    /// Export collapsed stack format (intermediate format for flame graph)
+    #[arg(long)]
+    pub flamegraph_stacks: Option<PathBuf>,
+
+    /// Width for flame graph SVG rendering in pixels
+    #[arg(long, default_value = "1200")]
+    pub flamegraph_width: usize,
+
+    /// Height for flame graph SVG rendering in pixels
+    #[arg(long, default_value = "800")]
+    pub flamegraph_height: usize,
 }
 
 #[derive(Parser)]
@@ -859,6 +1003,19 @@ pub struct SymbolicArgs {
     /// Overall symbolic analysis timeout in seconds
     #[arg(long, value_name = "SECONDS")]
     pub timeout: Option<u64>,
+
+    /// Seed the exploration order with this integer so the run is fully
+    /// reproducible.  The emitted "Replay token" value can be passed here
+    /// or to `--replay` on any subsequent run to reproduce the exact same
+    /// path ordering.  Mutually exclusive with `--replay`.
+    #[arg(long, value_name = "N", conflicts_with = "replay")]
+    pub seed: Option<u64>,
+
+    /// Replay a previous symbolic run by providing its replay token (the seed
+    /// value printed at the end of the original run).  Equivalent to
+    /// `--seed <TOKEN>`.  Mutually exclusive with `--seed`.
+    #[arg(long, value_name = "TOKEN", conflicts_with = "seed")]
+    pub replay: Option<u64>,
 }
 
 #[derive(Parser)]
@@ -882,6 +1039,10 @@ pub struct ReplayArgs {
     /// Show verbose output during replay
     #[arg(short, long)]
     pub verbose: bool,
+ 
+    /// Number of context lines to show for divergence (default: 3)
+    #[arg(short = 'C', long, default_value_t = 3)]
+    pub context: usize,
 }
 
 #[derive(Parser)]
@@ -924,6 +1085,34 @@ pub struct RemoteArgs {
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
+
+    /// Default request timeout in milliseconds (applies when no per-request override is set)
+    #[arg(long, default_value = "30000")]
+    pub timeout_ms: u64,
+
+    /// Ping request timeout in milliseconds
+    #[arg(long, default_value = "2000")]
+    pub ping_timeout_ms: u64,
+
+    /// Inspect request timeout in milliseconds
+    #[arg(long, default_value = "5000")]
+    pub inspect_timeout_ms: u64,
+
+    /// GetStorage request timeout in milliseconds
+    #[arg(long, default_value = "10000")]
+    pub storage_timeout_ms: u64,
+
+    /// Retry attempts for idempotent operations (Ping/Inspect/GetStorage/etc.)
+    #[arg(long, default_value = "3")]
+    pub retry_attempts: u32,
+
+    /// Base backoff delay in milliseconds for retries
+    #[arg(long, default_value = "200")]
+    pub retry_base_delay_ms: u64,
+
+    /// Maximum backoff delay in milliseconds for retries
+    #[arg(long, default_value = "2000")]
+    pub retry_max_delay_ms: u64,
 }
 
 #[derive(Parser)]
@@ -951,6 +1140,18 @@ pub struct AnalyzeArgs {
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// Filter rules to enable (can be specified multiple times)
+    #[arg(long, value_name = "RULE_ID")]
+    pub enable_rule: Vec<String>,
+
+    /// Filter rules to disable (can be specified multiple times)
+    #[arg(long, value_name = "RULE_ID")]
+    pub disable_rule: Vec<String>,
+
+    /// Minimum finding severity to report (low, medium, high)
+    #[arg(long, default_value = "low")]
+    pub min_severity: String,
 }
 
 #[derive(Parser)]
@@ -966,4 +1167,27 @@ pub struct ScenarioArgs {
     /// Initial storage state as JSON object
     #[arg(long)]
     pub storage: Option<String>,
+}
+
+/// Arguments for the `history prune` subcommand.
+#[derive(Parser, Debug)]
+#[command(about = "Prune or compact run history according to a retention policy")]
+pub struct HistoryPruneArgs {
+    /// Keep only the N most-recent history records; oldest are removed first.
+    ///
+    /// Takes precedence over `--history-max-records` (the global flag) when
+    /// both are supplied, so you can override the default policy for a single
+    /// explicit prune operation.
+    #[arg(long, value_name = "N")]
+    pub max_records: Option<usize>,
+
+    /// Remove records older than N days.
+    ///
+    /// Takes precedence over `--history-max-age-days` (the global flag).
+    #[arg(long, value_name = "DAYS")]
+    pub max_age_days: Option<u64>,
+
+    /// Show what would be removed without writing any changes to disk.
+    #[arg(long)]
+    pub dry_run: bool,
 }

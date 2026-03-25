@@ -50,9 +50,26 @@ soroban-debug remote \
   --args '["user1", 100]'
 ```
 
-## Security Model
+### Timeouts and Retries (network instability)
 
-### Important assumptions
+Remote sessions often run across CI, containers, or flaky links. The remote client supports deterministic timeouts and controlled retries for **idempotent** operations.
+
+- Retries apply to: `Ping`, `Inspect`, `GetStorage` (and other read-only state queries).
+- No-retry semantics apply to: execution/stepping commands (e.g. `Execute`, `Continue`, `StepIn/Next/StepOut`) to avoid unintended side effects.
+
+Example (tighter ping timeout, more retries):
+
+```bash
+soroban-debug remote \
+  --remote host:9229 \
+  --token "$TOKEN" \
+  --ping-timeout-ms 1000 \
+  --retry-attempts 5 \
+  --retry-base-delay-ms 100 \
+  --retry-max-delay-ms 1500
+```
+
+## Features
 
 - A token protects **authentication**, not **confidentiality**.
 - If you run remote debugging without TLS, the traffic should be treated as plaintext.

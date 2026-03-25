@@ -20,6 +20,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Docs guard (single canonical contributor guide)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f CONTRIBUTING.md
+
+          if [[ -f CONTRIBUTION.md ]]; then
+            lines="$(wc -l < CONTRIBUTION.md | tr -d ' ')"
+            if [[ "$lines" -gt 20 ]]; then
+              echo "CONTRIBUTION.md must remain a short redirect stub (<= 20 lines)."
+              exit 1
+            fi
+            grep -qi "deprecated" CONTRIBUTION.md
+            grep -q "CONTRIBUTING.md" CONTRIBUTION.md
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -105,10 +121,17 @@ jobs:
     name: Benchmark Regression Check
     runs-on: ubuntu-latest
     needs: check
+    env:
+      BENCH_WARN_PCT: 10
+      BENCH_FAIL_PCT: 20
+      # Criterion sampling knobs (tune if CI is too noisy/slow)
+      BENCH_SAMPLE_SIZE: 20
+      BENCH_MEASUREMENT_TIME: 5
+      BENCH_WARMUP_TIME: 2
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Needed to checkout main
+          fetch-depth: 0 # Needed to benchmark origin/main in a detached worktree
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -116,38 +139,63 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install critcmp
-        run: cargo install critcmp --version 0.1.7 || true # Ignore if already in cache
+      - name: Restore benchmark baseline (from default branch)
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench/baseline.json
+          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            bench-baseline-${{ runner.os }}-
 
+      - name: Verify benchmark script isolation behavior
+        shell: bash
+        run: bash scripts/test_benchmark_regressions.sh
+
+      - name: Run benchmark regression check
+        shell: bash
+        run: bash scripts/check_benchmark_regressions.sh
       - name: Run benchmarks (current)
-        run: cargo bench -- --save-baseline new --noplot
+        run: cargo bench --benches -- --noplot --sample-size $BENCH_SAMPLE_SIZE --measurement-time $BENCH_MEASUREMENT_TIME --warm-up-time $BENCH_WARMUP_TIME
 
-      - name: Checkout main and run benchmarks (baseline)
-        run: |
-          git checkout main
-          cargo bench -- --save-baseline base --noplot
-          git checkout -
+      - name: Record current results (JSON)
+        run: cargo run --quiet --bin bench-regression -- record --criterion target/criterion --out .bench/current.json
 
-      - name: Compare benchmarks and check for regressions (>10%)
+      - name: Compare against baseline (pass/warn/fail)
+        if: github.event_name == 'pull_request'
         shell: bash
         run: |
-          set +e
-          output="$(critcmp base new --threshold 10 2>&1)"
-          status=$?
           set -e
+          report="$(cargo run --quiet --bin bench-regression -- compare \
+            --baseline .bench/baseline.json \
+            --current .bench/current.json \
+            --warn-pct "$BENCH_WARN_PCT" \
+            --fail-pct "$BENCH_FAIL_PCT" \
+            --annotate-top 20 \
+            --max-rows 50 \
+            --require-baseline false)"
+          echo "$report"
+          echo "$report" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "$output"
+      - name: Update baseline on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p .bench
+          cp .bench/current.json .bench/baseline.json
 
-          if [ "$status" -eq 0 ]; then
-            exit 0
-          fi
+      - name: Save baseline cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .bench/baseline.json
+          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
 
-          if echo "$output" | grep -Fq "no benchmark comparisons to show"; then
-            echo "No overlapping benchmark IDs between 'base' and 'new'; skipping regression gate."
-            exit 0
-          fi
-
-          exit "$status"
+      - name: Upload baseline artifact (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-${{ runner.os }}
+          path: .bench/baseline.json
 
   check-manpages:
     name: Check man page sync

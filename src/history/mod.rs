@@ -1,5 +1,5 @@
 use crate::{DebuggerError, Result};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fs::{self, File, OpenOptions};
@@ -14,6 +14,32 @@ pub struct RunHistory {
     pub function: String,
     pub cpu_used: u64,
     pub memory_used: u64,
+}
+
+/// Retention policy controlling how many records to keep and their maximum age.
+///
+/// Both fields are optional; when `None` that dimension is unconstrained.
+/// When both are specified, the stricter constraint (fewer records) wins.
+#[derive(Debug, Clone, Default)]
+pub struct RetentionPolicy {
+    /// Keep only the N most-recent records (by parsed date). Oldest are dropped first.
+    pub max_records: Option<usize>,
+    /// Drop records whose parsed date is older than `now - max_age_days`.
+    pub max_age_days: Option<u64>,
+}
+
+impl RetentionPolicy {
+    /// Returns `true` if neither constraint is set (no pruning will occur).
+    pub fn is_empty(&self) -> bool {
+        self.max_records.is_none() && self.max_age_days.is_none()
+    }
+}
+
+/// Summary returned by [`HistoryManager::prune_history`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneReport {
+    pub removed: usize,
+    pub remaining: usize,
 }
 
 pub struct HistoryManager {
@@ -196,11 +222,99 @@ impl HistoryManager {
     }
 
     /// Append a new record optimizing with BufWriter.
+    ///
+    /// No retention policy is applied. Use [`append_record_with_policy`] to
+    /// automatically prune after appending.
     pub fn append_record(&self, record: RunHistory) -> Result<()> {
+        self.append_record_with_policy(record, &RetentionPolicy::default())
+    }
+
+    /// Append a new record and apply `policy` before flushing to disk.
+    ///
+    /// The sequence is:
+    /// 1. Acquire the file lock.
+    /// 2. Load current history.
+    /// 3. Push the new record.
+    /// 4. Apply retention (sort → prune).
+    /// 5. Atomically replace the file.
+    pub fn append_record_with_policy(
+        &self,
+        record: RunHistory,
+        policy: &RetentionPolicy,
+    ) -> Result<()> {
         let _lock = self.acquire_lock()?;
         let mut history = self.load_history()?;
         history.push(record);
 
+        if !policy.is_empty() {
+            Self::apply_retention(&mut history, policy);
+        }
+
+        self.flush_history(&history)
+    }
+
+    /// Prune the history file according to `policy` and return a [`PruneReport`].
+    ///
+    /// The operation is atomic: a temp file is written and renamed, so a
+    /// crash mid-write cannot corrupt the existing history.
+    pub fn prune_history(&self, policy: &RetentionPolicy) -> Result<PruneReport> {
+        let _lock = self.acquire_lock()?;
+        let mut history = self.load_history()?;
+        let before = history.len();
+
+        Self::apply_retention(&mut history, policy);
+        let remaining = history.len();
+        let removed = before - remaining;
+
+        if removed > 0 {
+            self.flush_history(&history)?;
+        }
+
+        Ok(PruneReport { removed, remaining })
+    }
+
+    /// Apply `policy` to `records` in-place.
+    ///
+    /// Records are first sorted chronologically (oldest → newest). The age
+    /// filter drops records whose date is older than `now - max_age_days`.
+    /// The count filter keeps only the trailing `max_records` entries.
+    ///
+    /// Deterministic ordering is preserved for callers that later run
+    /// regression or trend analysis on the pruned slice.
+    pub fn apply_retention(records: &mut Vec<RunHistory>, policy: &RetentionPolicy) {
+        if policy.is_empty() {
+            return;
+        }
+
+        // Sort oldest-to-newest so we can trim from the front.
+        sort_records_by_date(records);
+
+        // Age filter: drop records older than `now - max_age_days`.
+        if let Some(max_age) = policy.max_age_days {
+            let cutoff = Utc::now() - ChronoDuration::days(max_age as i64);
+            let cutoff_ms = cutoff.timestamp_millis();
+            records.retain(|r| {
+                // If date cannot be parsed, keep the record (safe default).
+                match parse_history_date_to_utc_millis(&r.date) {
+                    Some(ms) => ms >= cutoff_ms,
+                    None => true,
+                }
+            });
+        }
+
+        // Count filter: keep only the N most-recent (tail of sorted list).
+        if let Some(max_n) = policy.max_records {
+            let len = records.len();
+            if len > max_n {
+                records.drain(..len - max_n);
+            }
+        }
+    }
+
+    // ── private helpers ─────────────────────────────────────────────────────
+
+    /// Write `history` to disk atomically: tmp file → fsync → rename.
+    fn flush_history(&self, history: &[RunHistory]) -> Result<()> {
         let tmp_path = self.file_path.with_extension("json.tmp");
         let file = File::create(&tmp_path).map_err(|e| {
             DebuggerError::FileError(format!(
@@ -209,7 +323,7 @@ impl HistoryManager {
             ))
         })?;
         let mut writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(&mut writer, &history).map_err(|e| {
+        serde_json::to_writer_pretty(&mut writer, history).map_err(|e| {
             DebuggerError::FileError(format!(
                 "Failed to write history file {:?}: {}",
                 self.file_path, e
@@ -308,30 +422,99 @@ impl HistoryManager {
 
 /// Calculate the delta between the last two runs. Returns percentage increase if >10%.
 pub fn check_regression(records: &[RunHistory]) -> Option<(f64, f64)> {
+    check_regression_with_config(records, &RegressionConfig::default())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegressionConfig {
+    /// Percentage threshold above which we consider a regression.
+    ///
+    /// Example: `10.0` means "warn if latest is >10% higher than baseline".
+    pub threshold_pct: f64,
+    /// Number of most-recent records to consider for regression detection.
+    ///
+    /// The baseline is computed from the previous `lookback - 1` runs, and compared to the latest.
+    pub lookback: usize,
+    /// Trailing smoothing window size (moving average) applied to the series before regression detection.
+    ///
+    /// `1` disables smoothing.
+    pub smoothing_window: usize,
+}
+
+impl Default for RegressionConfig {
+    fn default() -> Self {
+        Self {
+            threshold_pct: 10.0,
+            lookback: 2,
+            smoothing_window: 1,
+        }
+    }
+}
+
+fn smooth_trailing(values: &[u64], window: usize) -> Vec<f64> {
+    let window = window.max(1);
+    let mut out = Vec::with_capacity(values.len());
+    for i in 0..values.len() {
+        let start = i.saturating_sub(window - 1);
+        let mut sum: u128 = 0;
+        let mut count: u128 = 0;
+        for v in &values[start..=i] {
+            sum = sum.saturating_add(*v as u128);
+            count += 1;
+        }
+        out.push((sum as f64) / (count as f64));
+    }
+    out
+}
+
+/// Check for CPU and memory regressions using a configurable lookback window and smoothing.
+///
+/// Returns `(cpu_pct, mem_pct)` where each value is `> 0.0` only when it exceeds `threshold_pct`.
+pub fn check_regression_with_config(
+    records: &[RunHistory],
+    config: &RegressionConfig,
+) -> Option<(f64, f64)> {
     if records.len() < 2 {
         return None;
     }
 
+    let lookback = config.lookback.max(2);
+    let smoothing = config.smoothing_window.max(1);
+    let threshold = config.threshold_pct.max(0.0);
+
     let mut sorted: Vec<&RunHistory> = records.iter().collect();
     sorted.sort_by(|a, b| compare_run_history_date(a, b));
-    let latest = sorted[sorted.len() - 1];
-    let previous = sorted[sorted.len() - 2];
+
+    let window_len = sorted.len().min(lookback);
+    if window_len < 2 {
+        return None;
+    }
+
+    let window = &sorted[sorted.len() - window_len..];
+    let cpu_raw: Vec<u64> = window.iter().map(|r| r.cpu_used).collect();
+    let mem_raw: Vec<u64> = window.iter().map(|r| r.memory_used).collect();
+    let cpu = smooth_trailing(&cpu_raw, smoothing);
+    let mem = smooth_trailing(&mem_raw, smoothing);
+
+    let cpu_latest = cpu[cpu.len() - 1];
+    let mem_latest = mem[mem.len() - 1];
+
+    let cpu_baseline = cpu[..cpu.len() - 1].iter().sum::<f64>() / ((cpu.len() - 1) as f64);
+    let mem_baseline = mem[..mem.len() - 1].iter().sum::<f64>() / ((mem.len() - 1) as f64);
 
     let mut regression_cpu = 0.0;
     let mut regression_mem = 0.0;
 
-    if previous.cpu_used > 0 && latest.cpu_used > previous.cpu_used {
-        let diff = (latest.cpu_used - previous.cpu_used) as f64;
-        let p = (diff / previous.cpu_used as f64) * 100.0;
-        if p > 10.0 {
+    if cpu_baseline > 0.0 && cpu_latest > cpu_baseline {
+        let p = ((cpu_latest - cpu_baseline) / cpu_baseline) * 100.0;
+        if p > threshold {
             regression_cpu = p;
         }
     }
 
-    if previous.memory_used > 0 && latest.memory_used > previous.memory_used {
-        let diff = (latest.memory_used - previous.memory_used) as f64;
-        let p = (diff / previous.memory_used as f64) * 100.0;
-        if p > 10.0 {
+    if mem_baseline > 0.0 && mem_latest > mem_baseline {
+        let p = ((mem_latest - mem_baseline) / mem_baseline) * 100.0;
+        if p > threshold {
             regression_mem = p;
         }
     }
@@ -410,6 +593,7 @@ mod tests {
     use std::io::Write as IoWrite;
     use tempfile::NamedTempFile;
     use tempfile::TempDir;
+    use chrono::Utc;
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -589,6 +773,74 @@ mod tests {
     }
 
     #[test]
+    fn regression_threshold_is_configurable() {
+        let p1 = make_record("2026-01-01T00:00:00Z", 1000, 1000);
+        let p2 = make_record("2026-01-02T00:00:00Z", 1150, 1050); // +15% cpu, +5% mem
+        let records = vec![p1, p2];
+
+        let cfg = RegressionConfig {
+            threshold_pct: 20.0,
+            lookback: 2,
+            smoothing_window: 1,
+        };
+        assert!(check_regression_with_config(&records, &cfg).is_none());
+    }
+
+    #[test]
+    fn regression_lookback_window_changes_baseline() {
+        // With lookback=2: baseline=140 -> latest=150 => ~7.14% (no regression for threshold 10%)
+        // With lookback=4: baseline=avg(100,120,140)=120 -> latest=150 => 25% (regression)
+        let records = vec![
+            make_record("2026-01-01", 100, 100),
+            make_record("2026-01-02", 120, 100),
+            make_record("2026-01-03", 140, 100),
+            make_record("2026-01-04", 150, 100),
+        ];
+
+        let cfg_short = RegressionConfig {
+            threshold_pct: 10.0,
+            lookback: 2,
+            smoothing_window: 1,
+        };
+        assert!(check_regression_with_config(&records, &cfg_short).is_none());
+
+        let cfg_long = RegressionConfig {
+            threshold_pct: 10.0,
+            lookback: 4,
+            smoothing_window: 1,
+        };
+        let (cpu, mem) = check_regression_with_config(&records, &cfg_long).unwrap();
+        assert!(cpu > 20.0 && cpu < 30.0, "expected ~25%, got {cpu}");
+        assert_eq!(mem, 0.0);
+    }
+
+    #[test]
+    fn regression_smoothing_can_reduce_noise() {
+        // Without smoothing, latest=200 vs baseline avg(100,200,100)=133.33 => 50% regression.
+        // With smoothing_window=3, the smoothed baseline/last reduce the delta below 40%.
+        let records = vec![
+            make_record("2026-01-01", 100, 0),
+            make_record("2026-01-02", 200, 0),
+            make_record("2026-01-03", 100, 0),
+            make_record("2026-01-04", 200, 0),
+        ];
+
+        let cfg_raw = RegressionConfig {
+            threshold_pct: 40.0,
+            lookback: 4,
+            smoothing_window: 1,
+        };
+        assert!(check_regression_with_config(&records, &cfg_raw).is_some());
+
+        let cfg_smooth = RegressionConfig {
+            threshold_pct: 40.0,
+            lookback: 4,
+            smoothing_window: 3,
+        };
+        assert!(check_regression_with_config(&records, &cfg_smooth).is_none());
+    }
+
+    #[test]
     fn test_persistence_logic() {
         let temp = tempfile::tempdir().unwrap();
         let manager = HistoryManager::with_path(temp.path().join("history.json"));
@@ -726,5 +978,152 @@ mod tests {
         assert_eq!(stats.last_mem, 150);
         assert_eq!(stats.first_date, "2026-01-01T00:00:00Z");
         assert_eq!(stats.last_date, "2026-01-03T00:00:00Z");
+    }
+
+    // ── RetentionPolicy / apply_retention tests ──────────────────────────────
+
+    #[test]
+    fn apply_retention_noop_when_policy_is_empty() {
+        let mut records = vec![
+            make_record("2026-01-01T00:00:00Z", 1, 1),
+            make_record("2026-01-02T00:00:00Z", 2, 2),
+        ];
+        let policy = RetentionPolicy::default();
+        HistoryManager::apply_retention(&mut records, &policy);
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn apply_retention_max_records_keeps_newest() {
+        let mut records = vec![
+            make_record("2026-01-01T00:00:00Z", 1, 1),
+            make_record("2026-01-02T00:00:00Z", 2, 2),
+            make_record("2026-01-03T00:00:00Z", 3, 3),
+            make_record("2026-01-04T00:00:00Z", 4, 4),
+            make_record("2026-01-05T00:00:00Z", 5, 5),
+        ];
+        let policy = RetentionPolicy { max_records: Some(3), max_age_days: None };
+        HistoryManager::apply_retention(&mut records, &policy);
+        assert_eq!(records.len(), 3);
+        // oldest two are gone; newest three remain
+        assert_eq!(records[0].cpu_used, 3);
+        assert_eq!(records[2].cpu_used, 5);
+    }
+
+    #[test]
+    fn apply_retention_max_records_noop_when_under_limit() {
+        let mut records = vec![
+            make_record("2026-01-01T00:00:00Z", 1, 1),
+            make_record("2026-01-02T00:00:00Z", 2, 2),
+        ];
+        let policy = RetentionPolicy { max_records: Some(10), max_age_days: None };
+        HistoryManager::apply_retention(&mut records, &policy);
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn apply_retention_max_age_drops_old_records() {
+        // Build a record 10 days in the past and one 1 day in the past.
+        let old_date = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let recent_date = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        let mut records = vec![
+            make_record(&old_date, 1, 1),
+            make_record(&recent_date, 2, 2),
+        ];
+        let policy = RetentionPolicy { max_records: None, max_age_days: Some(5) };
+        HistoryManager::apply_retention(&mut records, &policy);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].cpu_used, 2);
+    }
+
+    #[test]
+    fn apply_retention_unparseable_date_is_kept() {
+        let mut records = vec![
+            make_record("not-a-date", 99, 99),
+            make_record("2026-01-01T00:00:00Z", 1, 1),
+        ];
+        // Drop anything older than 1 day; "not-a-date" should be preserved.
+        let policy = RetentionPolicy { max_records: None, max_age_days: Some(1) };
+        HistoryManager::apply_retention(&mut records, &policy);
+        let cpus: Vec<u64> = records.iter().map(|r| r.cpu_used).collect();
+        assert!(cpus.contains(&99), "record with unparseable date must not be dropped");
+    }
+
+    #[test]
+    fn apply_retention_combined_policy_applies_both_constraints() {
+        let old_date = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let mut records = vec![
+            make_record(&old_date, 1, 1),                      // dropped by age
+            make_record("2026-01-04T00:00:00Z", 10, 10),      // parseable but static past date
+            make_record("2026-01-05T00:00:00Z", 20, 20),
+            make_record("2026-01-06T00:00:00Z", 30, 30),
+        ];
+        // max_age_days=5 drops the 10-day-old record; max_records=2 then keeps newest 2.
+        let policy = RetentionPolicy { max_records: Some(2), max_age_days: Some(5) };
+        HistoryManager::apply_retention(&mut records, &policy);
+        // After age-filter: 3 records remain (old_date dropped, static dates kept because
+        // they parse as recent relative to each other but are in the past beyond our cutoff).
+        // Regardless, max_records=2 must hold.
+        assert!(records.len() <= 2, "max_records must be respected; got {}", records.len());
+    }
+
+    #[test]
+    fn prune_history_returns_correct_report() {
+        let temp = TempDir::new().unwrap();
+        let manager = HistoryManager::with_path(temp.path().join("history.json"));
+        for i in 1..=5 {
+            manager.append_record(make_record(&format!("2026-01-0{}T00:00:00Z", i), i, i)).unwrap();
+        }
+
+        let policy = RetentionPolicy { max_records: Some(3), max_age_days: None };
+        let report = manager.prune_history(&policy).unwrap();
+        assert_eq!(report.removed, 2);
+        assert_eq!(report.remaining, 3);
+
+        let history = manager.load_history().unwrap();
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn prune_history_no_write_when_nothing_removed() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("history.json");
+        let manager = HistoryManager::with_path(path.clone());
+        manager.append_record(make_record("2026-01-01T00:00:00Z", 1, 1)).unwrap();
+
+        let mtime_before = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let policy = RetentionPolicy { max_records: Some(10), max_age_days: None };
+        let report = manager.prune_history(&policy).unwrap();
+        assert_eq!(report.removed, 0);
+
+        // File should NOT have been rewritten (mtime unchanged).
+        let mtime_after = fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after, "file must not be rewritten when nothing is removed");
+    }
+
+    #[test]
+    fn append_record_with_policy_prunes_oldest() {
+        let temp = TempDir::new().unwrap();
+        let manager = HistoryManager::with_path(temp.path().join("history.json"));
+
+        let policy = RetentionPolicy { max_records: Some(2), max_age_days: None };
+
+        for i in 1..=4u64 {
+            manager
+                .append_record_with_policy(
+                    make_record(&format!("2026-01-0{}T00:00:00Z", i), i, i),
+                    &policy,
+                )
+                .unwrap();
+        }
+
+        let history = manager.load_history().unwrap();
+        assert_eq!(history.len(), 2, "should have pruned to max 2 records");
+        // The two most-recent (day 3 and 4) should survive.
+        let cpus: Vec<u64> = history.iter().map(|r| r.cpu_used).collect();
+        assert!(cpus.contains(&3));
+        assert!(cpus.contains(&4));
     }
 }

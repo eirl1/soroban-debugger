@@ -1,14 +1,13 @@
-use crate::analyzer::symbolic::SymbolicConfig;
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
-use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
+use crate::analyzer::{security::{AnalyzerFilter, SecurityAnalyzer, Severity}, symbolic::SymbolicAnalyzer};
 use crate::cli::args::{
-    AnalyzeArgs, CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RemoteArgs,
-    ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, SymbolicProfile,
+    AnalyzeArgs, CompareArgs, HistoryPruneArgs, InspectArgs, InteractiveArgs, OptimizeArgs,
+    ProfileArgs, RemoteArgs, ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs,
     TuiArgs, UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
-use crate::history::{HistoryManager, RunHistory};
+use crate::history::{HistoryManager, PruneReport, RetentionPolicy, RunHistory};
 use crate::inspector::events::{ContractEvent, EventInspector};
 use crate::logging;
 use crate::output::OutputWriter;
@@ -83,18 +82,6 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
         format!("Function: {}", report.function),
         format!("Paths explored: {}", report.paths_explored),
         format!("Panics found: {}", report.panics_found),
-        format!(
-            "Budget: path_cap={}, input_combination_cap={}, timeout={}s",
-            report.metadata.config.max_paths,
-            report.metadata.config.max_input_combinations,
-            report.metadata.config.timeout_secs
-        ),
-        format!(
-            "Input combinations: generated={}, attempted={}, distinct_paths={}",
-            report.metadata.generated_input_combinations,
-            report.metadata.attempted_input_combinations,
-            report.metadata.distinct_paths_recorded
-        ),
     ];
 
     if report.metadata.truncation_reasons.is_empty() {
@@ -104,6 +91,16 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
             "Truncation: {}",
             report.metadata.truncation_reasons.join("; ")
         ));
+    }
+
+    match report.metadata.seed {
+        Some(seed) => lines.push(format!(
+            "Replay token: {} (reproduce with --replay {})",
+            seed, seed
+        )),
+        None => lines.push(
+            "Replay token: none (add --seed <N> to lock the exploration order)".to_string(),
+        ),
     }
 
     if report.paths.is_empty() {
@@ -150,6 +147,8 @@ fn symbolic_config_from_args(args: &SymbolicArgs) -> SymbolicConfig {
     if let Some(timeout) = args.timeout {
         config.timeout_secs = timeout;
     }
+    // --replay is a user-facing alias for --seed (both set the exploration seed).
+    config.seed = args.seed.or(args.replay);
     config
 }
 
@@ -208,9 +207,9 @@ fn render_security_report(output: &AnalyzeCommandOutput) -> String {
 
 /// Run instruction-level stepping mode.
 fn run_instruction_stepping(
-    engine: &mut DebuggerEngine,
-    function: &str,
-    args: Option<&str>,
+    _engine: &mut DebuggerEngine,
+    _function: &str,
+    _args: Option<&str>,
 ) -> Result<()> {
     logging::log_display(
         "\n=== Instruction Stepping Mode ===",
@@ -458,6 +457,100 @@ fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Execute remote run mode
+fn run_remote(args: &RunArgs, output_writer: &mut OutputWriter, remote_addr: &str) -> Result<()> {
+    print_info(format!("Connecting to remote debugger at {}", remote_addr));
+    let mut client = crate::client::RemoteClient::connect(remote_addr, args.token.clone())?;
+
+    if let Some(contract) = &args.contract {
+        print_info(format!("Loading contract on remote: {:?}", contract));
+        output_writer.write(&format!("Loading contract on remote: {:?}", contract))?;
+        let size = client.load_contract(&contract.to_string_lossy())?;
+        print_success(format!("Contract loaded on remote: {} bytes", size));
+    }
+
+    if let Some(snapshot_path) = &args.network_snapshot {
+        print_info(format!("Loading network snapshot on remote: {:?}", snapshot_path));
+        client.load_snapshot(&snapshot_path.to_string_lossy())?;
+    }
+
+    let function = match &args.function {
+        Some(f) => f.clone(),
+        None => {
+            client.ping()?;
+            print_success("Remote debugger is reachable");
+            return Ok(());
+        }
+    };
+
+    let parsed_args = if let Some(args_json) = &args.args {
+        Some(parse_args(args_json)?)
+    } else {
+        None
+    };
+
+    if let Some(storage_json) = &args.storage {
+        let storage = parse_storage(storage_json)?;
+        client.set_storage(&storage)?;
+    } else if let Some(import_path) = &args.import_storage {
+        let imported = crate::inspector::storage::StorageState::import_from_file(import_path)?;
+        let storage_str = serde_json::to_string(&imported).map_err(|e| {
+            DebuggerError::StorageError(format!("Failed to serialize imported storage: {}", e))
+        })?;
+        client.set_storage(&storage_str)?;
+    }
+
+    print_info("\n--- Remote Execution Start ---\n");
+    let storage_before_str = client.get_storage()?;
+    let storage_before: std::collections::HashMap<String, String> = serde_json::from_str(&storage_before_str)
+        .unwrap_or_default();
+
+    let result = client.execute(&function, parsed_args.as_deref())?;
+
+    let storage_after_str = client.get_storage()?;
+    let storage_after: std::collections::HashMap<String, String> = serde_json::from_str(&storage_after_str)
+        .unwrap_or_default();
+
+    let (cpu, mem) = client.get_budget()?;
+
+    print_success("\n--- Remote Execution Complete ---\n");
+    print_result(format!("Result: {:?}", result));
+
+    let storage_diff = crate::inspector::storage::StorageInspector::compute_diff(
+        &storage_before,
+        &storage_after,
+        &args.alert_on_change
+    );
+    if !storage_diff.is_empty() || !args.alert_on_change.is_empty() {
+        print_info("\n--- Storage Changes ---");
+        crate::inspector::storage::StorageInspector::display_diff(&storage_diff);
+    }
+
+    if args.is_json_output() {
+        let output = serde_json::json!({
+            "status": "success",
+            "result": result,
+            "budget": {
+                "cpu_instructions": cpu,
+                "memory_bytes": mem,
+            },
+            "storage_diff": storage_diff,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => {
+                let err_out = serde_json::json!({
+                    "status": "error",
+                    "errors": [e.to_string()]
+                });
+                println!("{}", serde_json::to_string_pretty(&err_out).unwrap_or_default());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute the run command.
 #[tracing::instrument(skip_all, fields(contract = ?args.contract, function = args.function))]
 pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
@@ -481,6 +574,10 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
     if args.dry_run {
         return run_dry_run(&args);
+    }
+
+    if let Some(remote_addr) = &args.remote {
+        return run_remote(&args, &mut output_writer, remote_addr);
     }
 
     let contract = args
@@ -668,7 +765,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         display_mock_call_log(&mock_calls);
     }
 
-    // Save budget info to history
+    // Save budget info to history, applying any configured retention policy.
     let host = engine.executor().host();
     let budget = crate::inspector::budget::BudgetInspector::get_cpu_usage(host);
     if let Ok(manager) = HistoryManager::new() {
@@ -679,7 +776,17 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             cpu_used: budget.cpu_instructions,
             memory_used: budget.memory_bytes,
         };
-        let _ = manager.append_record(record);
+        // Build retention policy from env vars that main.rs sets from the
+        // --history-max-records and --history-max-age-days global CLI flags.
+        let retention = RetentionPolicy {
+            max_records: std::env::var("SOROBAN_DEBUG_HISTORY_MAX_RECORDS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            max_age_days: std::env::var("SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+        };
+        let _ = manager.append_record_with_policy(record, &retention);
     }
     let _json_memory_summary = engine.executor().last_memory_summary().cloned();
 
@@ -1540,6 +1647,31 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
         logging::log_display(format!("\n{}", markdown), logging::LogLevel::Info);
     }
 
+    // Export flame graph SVG if requested
+    if let Some(flamegraph_path) = &args.flamegraph {
+        let stacks = crate::profiler::FlameGraphGenerator::from_report(&report);
+        crate::profiler::FlameGraphGenerator::write_svg_file(
+            &stacks,
+            flamegraph_path,
+            args.flamegraph_width,
+            args.flamegraph_height,
+        )?;
+        logging::log_display(
+            format!("Flame graph SVG written to: {:?}", flamegraph_path),
+            logging::LogLevel::Info,
+        );
+    }
+
+    // Export collapsed stack format if requested
+    if let Some(stacks_path) = &args.flamegraph_stacks {
+        let stacks = crate::profiler::FlameGraphGenerator::from_report(&report);
+        crate::profiler::FlameGraphGenerator::write_collapsed_stack_file(&stacks, stacks_path)?;
+        logging::log_display(
+            format!("Collapsed stack format written to: {:?}", stacks_path),
+            logging::LogLevel::Info,
+        );
+    }
+
     Ok(())
 }
 
@@ -1552,7 +1684,7 @@ pub fn compare(args: CompareArgs) -> Result<()> {
     let trace_b = crate::compare::ExecutionTrace::from_file(&args.trace_b)?;
 
     print_info("Comparing traces...");
-    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b);
+    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b, args.context);
     let rendered = crate::compare::CompareEngine::render_report(&report);
 
     if let Some(output_path) = &args.output {
@@ -1674,7 +1806,7 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 
     // Compare results
     print_info("\n--- Comparison ---");
-    let report = crate::compare::CompareEngine::compare(&truncated_original, &replayed_trace);
+    let report = crate::compare::CompareEngine::compare(&truncated_original, &replayed_trace, args.context);
     let rendered = crate::compare::CompareEngine::render_report(&report);
 
     if let Some(output_path) = &args.output {
@@ -1715,7 +1847,7 @@ pub fn server(args: ServerArgs) -> Result<()> {
         "Starting remote debug server on port {}",
         args.port
     ));
-    if let Some(token) = &args.token {
+    if args.token.is_some() {
         print_info("Token authentication enabled");
         if token.trim().len() < 16 {
             print_warning(
@@ -1749,7 +1881,21 @@ pub fn server(args: ServerArgs) -> Result<()> {
 /// Connect to remote debug server
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Connecting to remote debugger at {}", args.remote));
-    let mut client = crate::client::RemoteClient::connect(&args.remote, args.token.clone())?;
+    let config = crate::client::remote_client::RemoteClientConfig {
+        timeouts: crate::client::remote_client::RequestTimeouts {
+            default: std::time::Duration::from_millis(args.timeout_ms),
+            ping: std::time::Duration::from_millis(args.ping_timeout_ms),
+            inspect: std::time::Duration::from_millis(args.inspect_timeout_ms),
+            get_storage: std::time::Duration::from_millis(args.storage_timeout_ms),
+        },
+        retry: crate::client::remote_client::RetryPolicy {
+            max_attempts: args.retry_attempts as usize,
+            base_delay: std::time::Duration::from_millis(args.retry_base_delay_ms),
+            max_delay: std::time::Duration::from_millis(args.retry_max_delay_ms),
+        },
+    };
+    let mut client =
+        crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
 
     if let Some(contract) = &args.contract {
         print_info(format!("Loading contract: {:?}", contract));
@@ -1994,11 +2140,31 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
         }
     }
 
+    let min_severity = match args.min_severity.to_lowercase().as_str() {
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        other => {
+            return Err(DebuggerError::InvalidArguments(format!(
+                "Invalid min-severity '{}'. Use 'low', 'medium', or 'high'.",
+                other
+            ))
+            .into());
+        }
+    };
+
+    let filter = AnalyzerFilter {
+        enable_rules: args.enable_rule,
+        disable_rules: args.disable_rule,
+        min_severity,
+    };
+
     let analyzer = SecurityAnalyzer::new();
     let report = analyzer.analyze(
         &wasm_file.bytes,
         executor.as_ref(),
         trace_entries.as_deref(),
+        &filter,
     )?;
     let output = AnalyzeCommandOutput {
         findings: report.findings,
@@ -2051,7 +2217,11 @@ pub async fn repl(args: ReplArgs) -> Result<()> {
 }
 
 /// Show budget trend chart
-pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Result<()> {
+pub fn show_budget_trend(
+    contract: Option<&str>,
+    function: Option<&str>,
+    regression: crate::history::RegressionConfig,
+) -> Result<()> {
     let manager = HistoryManager::new()?;
     let mut records = manager.filter_history(contract, function)?;
 
@@ -2083,6 +2253,10 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
             function.unwrap_or("*")
         );
         println!(
+            "Regression params: threshold>{:.1}% lookback={} smoothing={}",
+            regression.threshold_pct, regression.lookback, regression.smoothing_window
+        );
+        println!(
             "Runs: {}   Range: {} -> {}",
             stats.count, stats.first_date, stats.last_date
         );
@@ -2104,10 +2278,12 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
         println!("CPU trend: {}", Formatter::sparkline(&cpu_values, 50));
         println!("MEM trend: {}", Formatter::sparkline(&mem_values, 50));
 
-        if let Some((cpu_reg, mem_reg)) = crate::history::check_regression(&records) {
+        if let Some((cpu_reg, mem_reg)) =
+            crate::history::check_regression_with_config(&records, &regression)
+        {
             if cpu_reg > 0.0 || mem_reg > 0.0 {
                 println!();
-                println!("Regression warning (last two runs):");
+                println!("Regression warning (latest vs baseline):");
                 if cpu_reg > 0.0 {
                     println!("  CPU increased by {:.1}%", cpu_reg);
                 }
@@ -2132,4 +2308,47 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Failed to compute budget trend statistics"));
     }
+}
+
+/// Prune or compact run history according to a retention policy.
+///
+/// `global_policy` is built from the top-level `--history-max-records` /
+/// `--history-max-age-days` CLI flags (or env vars).  Fields from `args`
+/// (the explicit `history prune` subcommand flags) override the global policy
+/// when set, allowing per-invocation overrides.
+///
+/// With `--dry-run` the function prints what would be removed but does not
+/// write any changes to disk.
+pub fn history_prune(args: HistoryPruneArgs, global_policy: RetentionPolicy) -> Result<()> {
+    // Subcommand flags override the global policy when provided.
+    let policy = RetentionPolicy {
+        max_records: args.max_records.or(global_policy.max_records),
+        max_age_days: args.max_age_days.or(global_policy.max_age_days),
+    };
+
+    if policy.is_empty() {
+        println!("No retention policy specified. Use --max-records or --max-age-days.");
+        return Ok(());
+    }
+
+    let manager = HistoryManager::new()?;
+
+    if args.dry_run {
+        // Load, simulate, report — no disk writes.
+        let mut records = manager.load_history()?;
+        let before = records.len();
+        HistoryManager::apply_retention(&mut records, &policy);
+        let remaining = records.len();
+        let removed = before - remaining;
+        println!("[dry-run] Would remove {removed} record(s), {remaining} would remain.");
+    } else {
+        let PruneReport { removed, remaining } = manager.prune_history(&policy)?;
+        if removed == 0 {
+            println!("History is within the retention limit. Nothing removed ({remaining} records).");
+        } else {
+            println!("Removed {removed} record(s). {remaining} record(s) remaining.");
+        }
+    }
+
+    Ok(())
 }

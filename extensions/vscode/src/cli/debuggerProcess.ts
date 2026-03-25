@@ -51,6 +51,66 @@ export interface BackendBreakpointCapabilities {
   logPoints: boolean;
 }
 
+export type LaunchPreflightQuickFix =
+  | 'pickBinary'
+  | 'pickContract'
+  | 'pickSnapshot'
+  | 'openLaunchConfig'
+  | 'generateLaunchConfig'
+  | 'openSettings';
+
+export interface LaunchPreflightIssue {
+  field: 'binaryPath' | 'contractPath' | 'snapshotPath' | 'entrypoint' | 'args' | 'port' | 'token';
+  message: string;
+  expected: string;
+  quickFixes: LaunchPreflightQuickFix[];
+}
+
+export interface LaunchPreflightResult {
+  ok: boolean;
+  issues: LaunchPreflightIssue[];
+  resolvedBinaryPath: string;
+}
+
+type ProtocolMismatchDetails = {
+  extensionVersion: string;
+  backendName?: string;
+  backendVersion?: string;
+  backendProtocolMin?: number;
+  backendProtocolMax?: number;
+  extra?: string;
+};
+
+export class DebuggerTimeoutError extends Error {
+  name = 'TimeoutError';
+
+  constructor(
+    public readonly requestType: string,
+    public readonly timeoutMs: number
+  ) {
+    super(`${requestType} timed out after ${timeoutMs}ms`);
+  }
+}
+
+export function formatProtocolMismatchMessage(details: ProtocolMismatchDetails): string {
+  const backendName = details.backendName ?? 'soroban-debug';
+  const backendVersion = details.backendVersion ?? 'unknown';
+  const backendProtocol = details.backendProtocolMin !== undefined && details.backendProtocolMax !== undefined
+    ? `[${details.backendProtocolMin}..=${details.backendProtocolMax}]`
+    : 'unknown';
+
+  const extra = details.extra?.trim();
+  const extraLine = extra ? `\nDetails: ${extra}` : '';
+
+  return [
+    'Soroban debugger protocol negotiation failed.',
+    `Extension version: ${details.extensionVersion} (supports protocol [${WIRE_PROTOCOL_MIN_VERSION}..=${WIRE_PROTOCOL_MAX_VERSION}]).`,
+    `Backend: ${backendName} ${backendVersion} (supports protocol ${backendProtocol}).`,
+    'Remediation: rebuild or reinstall the VS Code extension and the soroban-debug backend so they come from the same revision.',
+    extraLine
+  ].filter((line) => line.length > 0).join('\n');
+}
+
 type DebugRequest =
   | { type: 'Handshake'; client_name: string; client_version: string; protocol_min: number; protocol_max: number }
   | { type: 'Authenticate'; token: string }
@@ -62,15 +122,9 @@ type DebugRequest =
   | { type: 'Continue' }
   | { type: 'Inspect' }
   | { type: 'GetStorage' }
-  | {
-      type: 'SetBreakpoint';
-      id: string;
-      function: string;
-      condition?: string;
-      hit_condition?: string;
-      log_message?: string;
-    }
-  | { type: 'ClearBreakpoint'; id: string }
+  | { type: 'SetBreakpoint'; function: string }
+  | { type: 'ClearBreakpoint'; function: string }
+  | { type: 'ResolveSourceBreakpoints'; source_path: string; lines: number[]; exported_functions: string[] }
   | { type: 'Evaluate'; expression: string; frame_id?: number }
   | { type: 'Ping' }
   | { type: 'Disconnect' }
@@ -89,18 +143,9 @@ type DebugResponse =
   | { type: 'InspectionResult'; function?: string; args?: string; step_count: number; paused: boolean; call_stack: string[] }
   | { type: 'StorageState'; storage_json: string }
   | { type: 'SnapshotLoaded'; summary: string }
-  | { type: 'BreakpointSet'; id: string; function: string }
-  | { type: 'BreakpointCleared'; id: string }
-  | {
-      type: 'BreakpointsList';
-      breakpoints: Array<{
-        id: string;
-        function: string;
-        condition?: string;
-        hit_condition?: string;
-        log_message?: string;
-      }>;
-    }
+  | { type: 'BreakpointSet'; function: string }
+  | { type: 'BreakpointCleared'; function: string }
+  | { type: 'SourceBreakpointsResolved'; breakpoints: Array<{ requested_line: number; line: number; verified: boolean; function?: string; reason_code: string; message: string }> }
   | { type: 'EvaluateResult'; result: string; result_type?: string; variables_reference: number }
   | {
       type: 'Capabilities';
@@ -135,13 +180,6 @@ type RequestOptions = {
 class RequestAbortedError extends Error {
   name = 'AbortError';
   constructor(message = 'Request aborted') {
-    super(message);
-  }
-}
-
-class RequestTimeoutError extends Error {
-  name = 'TimeoutError';
-  constructor(message = 'Request timed out') {
     super(message);
   }
 }
@@ -189,7 +227,7 @@ export class DebuggerProcess {
     }
 
     const shouldSpawnServer = this.config.spawnServer !== false;
-    const binaryPath = shouldSpawnServer ? this.resolveBinaryPath() : null;
+    const binaryPath = shouldSpawnServer ? resolveDebuggerBinaryPath(this.config) : null;
     const port = this.config.port ?? await this.findAvailablePort();
     this.port = port;
 
@@ -213,6 +251,7 @@ export class DebuggerProcess {
         throw new Error('DebuggerProcessConfig.port is required when spawnServer is false');
       }
 
+    try {
       await this.waitForServer(port);
       this.logManager?.log(LogLevel.Info, LogPhase.Connect, `Connecting to debugger server on port ${port}...`);
       await this.connect(port);
@@ -424,6 +463,34 @@ export class DebuggerProcess {
     return functions;
   }
 
+  async resolveSourceBreakpoints(
+    sourcePath: string,
+    lines: number[],
+    exportedFunctions: Set<string>,
+    options?: RequestOptions
+  ): Promise<Array<{ requestedLine: number; line: number; verified: boolean; functionName?: string; reasonCode: string; message: string }>> {
+    const response = await this.sendRequest(
+      {
+        type: 'ResolveSourceBreakpoints',
+        source_path: sourcePath,
+        lines,
+        exported_functions: Array.from(exportedFunctions)
+      },
+      options
+    );
+
+    this.expectResponse(response, 'SourceBreakpointsResolved');
+
+    return response.breakpoints.map((bp) => ({
+      requestedLine: bp.requested_line,
+      line: bp.line,
+      verified: bp.verified,
+      functionName: bp.function,
+      reasonCode: bp.reason_code,
+      message: bp.message
+    }));
+  }
+
   async stop(): Promise<void> {
     try {
       if (this.socket && !this.socket.destroyed) {
@@ -622,7 +689,9 @@ export class DebuggerProcess {
       let timeout: NodeJS.Timeout | undefined;
       let abortHandler: (() => void) | undefined;
 
-      if (options?.timeoutMs && options.timeoutMs > 0) {
+      const timeoutMs = options?.timeoutMs ?? this.defaultRequestTimeoutMs;
+
+      if (timeoutMs > 0) {
         timeout = setTimeout(() => {
           const pending = this.pendingRequests.get(id);
           if (!pending) {
@@ -630,8 +699,8 @@ export class DebuggerProcess {
           }
           this.pendingRequests.delete(id);
           pending.cleanup();
-          pending.reject(new RequestTimeoutError());
-        }, options.timeoutMs);
+          pending.reject(new DebuggerTimeoutError(request.type, timeoutMs));
+        }, timeoutMs);
       }
 
       if (options?.signal) {

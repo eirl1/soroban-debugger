@@ -4,7 +4,7 @@
 .SH NAME
 replay \- Replay execution from a previously exported trace file
 .SH SYNOPSIS
-\fBreplay\fR [\fB\-c\fR|\fB\-\-contract\fR] [\fB\-\-replay\-until\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fITRACE_FILE\fR> 
+\fBreplay\fR [\fB\-c\fR|\fB\-\-contract\fR] [\fB\-\-replay\-until\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-C\fR|\fB\-\-context\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fITRACE_FILE\fR> 
 .SH DESCRIPTION
 Replay execution from a previously exported trace file
 .SH OPTIONS
@@ -20,6 +20,9 @@ Output file for the diff report (default: stdout)
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Show verbose output during replay
+.TP
+\fB\-C\fR, \fB\-\-context\fR \fI<CONTEXT>\fR [default: 3]
+Number of context lines to show for divergence (default: 3)
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

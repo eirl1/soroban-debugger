@@ -17,9 +17,9 @@ Thank you for your interest in contributing to the **Soroban Debugger** project!
 9. [Issue Guidelines](#issue-guidelines)
 10. [Areas for Contribution](#areas-for-contribution)
 11. [Project Structure](#project-structure)
-12. [Updating Man Pages](#updating-man-pages)
-13. [Code of Conduct](#code-of-conduct)
-14. [Communication](#communication)
+12. [Code of Conduct](#code-of-conduct)
+13. [Communication](#communication)
+14. [Release Process](#release-process)
 
 ---
 
@@ -120,6 +120,15 @@ Run a specific integration test file:
 ```bash
 cargo test --test <test_file>
 ```
+
+Reproduce the benchmark regression gate locally without checking out `main` in place:
+
+```bash
+cargo install critcmp --version 0.1.7
+bash scripts/check_benchmark_regressions.sh
+```
+
+The script benchmarks your current branch, then benchmarks `origin/main` in a temporary detached worktree when available so your checkout stays on your branch throughout the comparison.
 
 Tests should be:
 - Isolated and repeatable
@@ -275,6 +284,8 @@ git rebase upstream/main
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+bash scripts/test_benchmark_regressions.sh
+bash scripts/check_benchmark_regressions.sh
 ```
 
 3. Push your branch and open a PR against `main`.
@@ -399,3 +410,11 @@ We are committed to providing a welcoming and inclusive environment for everyone
 ---
 
 Thank you for helping make Soroban Debugger better!
+
+---
+
+## Release Process
+
+Releases are gated by a single unified checklist that covers Rust/CLI, analyzers, VS Code extension checks, and benchmark thresholds:
+
+- `docs/release-checklist.md`

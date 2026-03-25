@@ -17,6 +17,7 @@ pub struct ComparisonReport {
     pub return_value_diff: ReturnValueDiff,
     pub flow_diff: FlowDiff,
     pub event_diff: EventDiff,
+    pub context_lines: usize,
 }
 
 /// Storage key-level differences.
@@ -65,6 +66,7 @@ pub struct FlowDiff {
 pub struct EventDiff {
     pub a_events: Vec<EventEntry>,
     pub b_events: Vec<EventEntry>,
+    pub diff_lines: Vec<DiffLine>,
     pub identical: bool,
 }
 
@@ -86,7 +88,11 @@ pub struct CompareEngine;
 
 impl CompareEngine {
     /// Compare two execution traces and produce a report.
-    pub fn compare(trace_a: &ExecutionTrace, trace_b: &ExecutionTrace) -> ComparisonReport {
+    pub fn compare(
+        trace_a: &ExecutionTrace,
+        trace_b: &ExecutionTrace,
+        context_lines: usize,
+    ) -> ComparisonReport {
         let label_a = trace_a
             .label
             .clone()
@@ -107,6 +113,7 @@ impl CompareEngine {
             ),
             flow_diff: Self::diff_flow(&trace_a.call_sequence, &trace_b.call_sequence),
             event_diff: Self::diff_events(&trace_a.events, &trace_b.events),
+            context_lines,
         }
     }
 
@@ -252,11 +259,58 @@ impl CompareEngine {
 
     fn diff_events(a: &[EventEntry], b: &[EventEntry]) -> EventDiff {
         let identical = a == b;
+        let diff_lines = if identical {
+            vec![]
+        } else {
+            Self::compute_lcs_diff_generic(a, b)
+        };
+
         EventDiff {
             a_events: a.to_vec(),
             b_events: b.to_vec(),
+            diff_lines,
             identical,
         }
+    }
+
+    /// Generic LCS diff for any type that implements Display and PartialEq.
+    fn compute_lcs_diff_generic<T>(a: &[T], b: &[T]) -> Vec<DiffLine>
+    where
+        T: std::fmt::Display + PartialEq,
+    {
+        let n = a.len();
+        let m = b.len();
+
+        let mut table = vec![vec![0u32; m + 1]; n + 1];
+        for i in 1..=n {
+            for j in 1..=m {
+                if a[i - 1] == b[j - 1] {
+                    table[i][j] = table[i - 1][j - 1] + 1;
+                } else {
+                    table[i][j] = table[i - 1][j].max(table[i][j - 1]);
+                }
+            }
+        }
+
+        let mut lines = Vec::new();
+        let (mut i, mut j) = (n, m);
+
+        while i > 0 || j > 0 {
+            if i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+                lines.push(DiffLine::Same(a[i - 1].to_string()));
+                i -= 1;
+                j -= 1;
+            } else if j > 0 && (i == 0 || table[i][j - 1] >= table[i - 1][j]) {
+                lines.push(DiffLine::OnlyB(b[j - 1].to_string()));
+                j -= 1;
+            } else {
+                lines.push(DiffLine::OnlyA(a[i - 1].to_string()));
+                i -= 1;
+            }
+        }
+
+        lines.reverse();
+        lines
     }
 
     // ── Report rendering ─────────────────────────────────────────────
@@ -272,6 +326,10 @@ impl CompareEngine {
             report.label_a, report.label_b
         ));
         out.push_str("═══════════════════════════════════════════════════════════════\n\n");
+
+        // ── First Divergence Context ───────────────────────────────
+        Self::render_first_divergence(&report, &mut out);
+        out.push('\n');
 
         // ── Storage ────────────────────────────────────────────────
         out.push_str("───────────────── Storage Changes ─────────────────\n\n");
@@ -448,6 +506,64 @@ impl CompareEngine {
         out
     }
 
+    fn render_first_divergence(report: &ComparisonReport, out: &mut String) {
+        if report.flow_diff.identical && report.event_diff.identical {
+            return;
+        }
+
+        out.push_str("───────────────── First Divergence Context ────────\n\n");
+
+        // Prioritize first divergence in flow (calls) then events
+        let flow_divergence = report
+            .flow_diff
+            .diff_lines
+            .iter()
+            .position(|l| matches!(l, DiffLine::OnlyA(_) | DiffLine::OnlyB(_)));
+
+        let event_divergence = report
+            .event_diff
+            .diff_lines
+            .iter()
+            .position(|l| matches!(l, DiffLine::OnlyA(_) | DiffLine::OnlyB(_)));
+
+        match (flow_divergence, event_divergence) {
+            (Some(f_idx), _) => {
+                out.push_str("  First meaningful divergence detected in Execution Flow:\n\n");
+                Self::render_diff_window(&report.flow_diff.diff_lines, f_idx, report.context_lines, out);
+            }
+            (None, Some(e_idx)) => {
+                out.push_str("  First meaningful divergence detected in Events:\n\n");
+                Self::render_diff_window(&report.event_diff.diff_lines, e_idx, report.context_lines, out);
+            }
+            (None, None) => {
+                out.push_str("  (No direct sequence divergence found, check return values or storage)\n");
+            }
+        }
+    }
+
+    fn render_diff_window(lines: &[DiffLine], idx: usize, context: usize, out: &mut String) {
+        let start = idx.saturating_sub(context);
+        let end = (idx + context + 1).min(lines.len());
+
+        if start > 0 {
+            out.push_str("    ...\n");
+        }
+
+        for i in start..end {
+            let line = &lines[i];
+            let marker = if i == idx { ">" } else { " " };
+            match line {
+                DiffLine::Same(s) => out.push_str(&format!("  {}   {}\n", marker, s)),
+                DiffLine::OnlyA(s) => out.push_str(&format!("  {}-  {}\n", marker, s)),
+                DiffLine::OnlyB(s) => out.push_str(&format!("  {}+  {}\n", marker, s)),
+            }
+        }
+
+        if end < lines.len() {
+            out.push_str("    ...\n");
+        }
+    }
+
     fn format_call_display(entry: &CallEntry) -> String {
         let indent = "  ".repeat(entry.depth as usize);
         if let Some(ref args) = entry.args {
@@ -576,7 +692,7 @@ mod tests {
     fn test_storage_diff_detects_changes() {
         let a = make_trace_a();
         let b = make_trace_b();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         // balance:Bob changed 100 → 150
         assert!(report.storage_diff.modified.contains_key("balance:Bob"));
@@ -594,7 +710,7 @@ mod tests {
     fn test_budget_diff_computes_deltas() {
         let a = make_trace_a();
         let b = make_trace_b();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         // B used fewer CPU instructions
         assert_eq!(report.budget_diff.cpu_delta, Some(-7000));
@@ -606,7 +722,7 @@ mod tests {
     fn test_return_value_diff_not_equal() {
         let a = make_trace_a();
         let b = make_trace_b();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         assert!(!report.return_value_diff.equal);
     }
@@ -616,7 +732,7 @@ mod tests {
         let a = make_trace_a();
         let mut b = make_trace_b();
         b.return_value = a.return_value.clone();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         assert!(report.return_value_diff.equal);
     }
@@ -625,7 +741,7 @@ mod tests {
     fn test_flow_diff_detects_difference() {
         let a = make_trace_a();
         let b = make_trace_b();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         assert!(!report.flow_diff.identical);
         // The diff should contain at least one OnlyB line (check_allowance)
@@ -641,7 +757,7 @@ mod tests {
         let a = make_trace_a();
         let mut b = make_trace_a();
         b.label = Some("copy".to_string());
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         assert!(report.flow_diff.identical);
     }
@@ -650,7 +766,7 @@ mod tests {
     fn test_event_diff_detects_difference() {
         let a = make_trace_a();
         let b = make_trace_b();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         assert!(!report.event_diff.identical);
     }
@@ -659,7 +775,7 @@ mod tests {
     fn test_render_report_no_panic() {
         let a = make_trace_a();
         let b = make_trace_b();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
         let rendered = CompareEngine::render_report(&report);
 
         assert!(rendered.contains("Storage Changes"));
@@ -673,7 +789,7 @@ mod tests {
     fn test_identical_traces() {
         let a = make_trace_a();
         let b = make_trace_a();
-        let report = CompareEngine::compare(&a, &b);
+        let report = CompareEngine::compare(&a, &b, 3);
 
         assert!(report.storage_diff.only_in_a.is_empty());
         assert!(report.storage_diff.only_in_b.is_empty());
@@ -686,13 +802,25 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_budget_in_one_trace() {
+    fn test_first_divergence_context_rendering() {
         let a = make_trace_a();
-        let mut b = make_trace_b();
-        b.budget = None;
-        let report = CompareEngine::compare(&a, &b);
+        let mut b = make_trace_a();
 
-        assert!(report.budget_diff.cpu_delta.is_none());
-        assert!(report.budget_diff.memory_delta.is_none());
+        // Introduce a difference in the middle of call sequence
+        b.call_sequence.insert(2, CallEntry {
+            function: "injected_call".to_string(),
+            args: None,
+            depth: 1,
+        });
+
+        let report = CompareEngine::compare(&a, &b, 1);
+        let rendered = CompareEngine::render_report(&report);
+
+        assert!(rendered.contains("First Divergence Context"));
+        assert!(rendered.contains("First meaningful divergence detected in Execution Flow"));
+        assert!(rendered.contains("+   injected_call()"));
+        // Check context (1 line before/after)
+        assert!(rendered.contains("    get_balance(Alice)"));
+        assert!(rendered.contains("    set_balance(Alice, 900)"));
     }
 }

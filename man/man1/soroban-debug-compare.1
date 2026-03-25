@@ -4,13 +4,16 @@
 .SH NAME
 compare \- Compare two execution trace JSON files side\-by\-side
 .SH SYNOPSIS
-\fBcompare\fR [\fB\-o\fR|\fB\-\-output\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fITRACE_A\fR> <\fITRACE_B\fR> 
+\fBcompare\fR [\fB\-o\fR|\fB\-\-output\fR] [\fB\-C\fR|\fB\-\-context\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fITRACE_A\fR> <\fITRACE_B\fR> 
 .SH DESCRIPTION
 Compare two execution trace JSON files side\-by\-side
 .SH OPTIONS
 .TP
 \fB\-o\fR, \fB\-\-output\fR \fI<OUTPUT>\fR
 Output file for the comparison report (default: stdout)
+.TP
+\fB\-C\fR, \fB\-\-context\fR \fI<CONTEXT>\fR [default: 3]
+Number of context lines to show around the first divergence
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

@@ -85,6 +85,29 @@ pub struct EventEntry {
     pub data: Option<String>,
 }
 
+impl std::fmt::Display for CallEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let indent = "  ".repeat(self.depth as usize);
+        if let Some(ref args) = self.args {
+            write!(f, "{}{}({})", indent, self.function, args)
+        } else {
+            write!(f, "{}{}()", indent, self.function)
+        }
+    }
+}
+
+impl std::fmt::Display for EventEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let contract = self
+            .contract_id
+            .as_deref()
+            .unwrap_or("<unknown-contract>");
+        let topics = self.topics.join(", ");
+        let data = self.data.as_deref().unwrap_or("<no-data>");
+        write!(f, "[{}] topics=[{}] data={}", contract, topics, data)
+    }
+}
+
 impl ExecutionTrace {
     /// Load an execution trace from a JSON file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {

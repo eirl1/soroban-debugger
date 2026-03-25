@@ -4,7 +4,7 @@
 .SH NAME
 soroban\-debug \- A debugger for Soroban smart contracts
 .SH SYNOPSIS
-\fBsoroban\-debug\fR [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-banner\fR] [\fB\-\-history\-file\fR] [\fB\-\-budget\-trend\fR] [\fB\-\-trend\-contract\fR] [\fB\-\-trend\-function\fR] [\fB\-\-version\-verbose\fR] [\fB\-\-list\-functions\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBsoroban\-debug\fR [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-banner\fR] [\fB\-\-history\-file\fR] [\fB\-\-history\-max\-records\fR] [\fB\-\-history\-max\-age\-days\fR] [\fB\-\-budget\-trend\fR] [\fB\-\-trend\-contract\fR] [\fB\-\-trend\-function\fR] [\fB\-\-trend\-regression\-threshold\-pct\fR] [\fB\-\-trend\-regression\-lookback\fR] [\fB\-\-trend\-regression\-smoothing\fR] [\fB\-\-version\-verbose\fR] [\fB\-\-list\-functions\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 A debugger for Soroban smart contracts
 .SH OPTIONS
@@ -26,6 +26,22 @@ Equivalent to setting `SOROBAN_DEBUG_HISTORY_FILE`.
 May also be specified with the \fBSOROBAN_DEBUG_HISTORY_FILE\fR environment variable. 
 .RE
 .TP
+\fB\-\-history\-max\-records\fR \fI<N>\fR
+Maximum number of history records to retain.
+
+When set, the oldest records are dropped after each appended run so the file never exceeds N entries.  Equivalent to setting `SOROBAN_DEBUG_HISTORY_MAX_RECORDS`.
+.RS
+May also be specified with the \fBSOROBAN_DEBUG_HISTORY_MAX_RECORDS\fR environment variable. 
+.RE
+.TP
+\fB\-\-history\-max\-age\-days\fR \fI<DAYS>\fR
+Drop history records older than N days.
+
+Applied on every append and when running `history prune`.  Equivalent to setting `SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS`.
+.RS
+May also be specified with the \fBSOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS\fR environment variable. 
+.RE
+.TP
 \fB\-\-budget\-trend\fR
 Show historical budget trend visualization
 .TP
@@ -34,6 +50,15 @@ Filter budget trend by contract hash
 .TP
 \fB\-\-trend\-function\fR \fI<TREND_FUNCTION>\fR
 Filter budget trend by function name
+.TP
+\fB\-\-trend\-regression\-threshold\-pct\fR \fI<PCT>\fR [default: 10]
+Regression threshold percentage for `\-\-budget\-trend` warnings
+.TP
+\fB\-\-trend\-regression\-lookback\fR \fI<N>\fR [default: 2]
+Lookback window (number of runs) for `\-\-budget\-trend` regression detection
+.TP
+\fB\-\-trend\-regression\-smoothing\fR \fI<N>\fR [default: 1]
+Smoothing window (moving average) for `\-\-budget\-trend` regression detection (1 disables smoothing)
 .TP
 \fB\-\-version\-verbose\fR
 Show detailed version information
@@ -95,6 +120,9 @@ Analyze contract for security vulnerabilities
 .TP
 soroban\-debug\-scenario(1)
 Run a multi\-step scenario from a TOML file
+.TP
+soroban\-debug\-history\-prune(1)
+Prune or compact run history according to a retention policy
 .TP
 soroban\-debug\-help(1)
 Print this message or the help of the given subcommand(s)
