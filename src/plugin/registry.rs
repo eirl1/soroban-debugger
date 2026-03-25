@@ -1,10 +1,14 @@
 use super::api::{OutputFormatter, PluginCommand, PluginError, PluginResult};
-use super::events::{EventContext, ExecutionEvent};
+use super::events::{
+    EventContext, ExecutionEvent, PluginInvocationKind, PluginInvocationOutcome, PluginTelemetryEvent,
+};
 use super::loader::{LoadedPlugin, PluginLoader, PluginTrustPolicy};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 static GLOBAL_PLUGIN_REGISTRY: OnceLock<Arc<RwLock<PluginRegistry>>> = OnceLock::new();
@@ -224,6 +228,44 @@ pub struct PluginRegistry {
 
     /// Whether hot-reload is enabled
     hot_reload_enabled: bool,
+
+    /// Runtime containment policy for plugin execution
+    policy: PluginExecutionPolicy,
+
+    /// Per-plugin health state used for containment and telemetry
+    health: RwLock<HashMap<String, PluginHealth>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginExecutionPolicy {
+    pub hook_timeout: Duration,
+    pub command_timeout: Duration,
+    pub formatter_timeout: Duration,
+    pub max_consecutive_failures: usize,
+    pub max_timeouts: usize,
+}
+
+impl Default for PluginExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            hook_timeout: Duration::from_millis(250),
+            command_timeout: Duration::from_secs(2),
+            formatter_timeout: Duration::from_millis(500),
+            max_consecutive_failures: 3,
+            max_timeouts: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct PluginHealth {
+    consecutive_failures: usize,
+    timeout_count: usize,
+    circuit_open: bool,
+    total_failures: usize,
+    total_timeouts: usize,
+    total_panics: usize,
+    last_error: Option<String>,
 }
 
 impl PluginRegistry {
@@ -243,6 +285,18 @@ impl PluginRegistry {
         plugin_dir: PathBuf,
         trust_policy: PluginTrustPolicy,
     ) -> PluginResult<Self> {
+        Self::with_plugin_dir_trust_and_policy(
+            plugin_dir,
+            trust_policy,
+            PluginExecutionPolicy::default(),
+        )
+    }
+
+    pub fn with_plugin_dir_trust_and_policy(
+        plugin_dir: PathBuf,
+        trust_policy: PluginTrustPolicy,
+        policy: PluginExecutionPolicy,
+    ) -> PluginResult<Self> {
         // Ensure plugin directory exists
         if !plugin_dir.exists() {
             info!("Creating plugin directory: {:?}", plugin_dir);
@@ -258,6 +312,8 @@ impl PluginRegistry {
             plugins: HashMap::new(),
             loader: PluginLoader::with_trust_policy(plugin_dir, trust_policy),
             hot_reload_enabled: false,
+            policy,
+            health: RwLock::new(HashMap::new()),
         })
     }
 
@@ -355,6 +411,10 @@ impl PluginRegistry {
 
         self.plugins
             .insert(name.clone(), Arc::new(RwLock::new(plugin)));
+        self.health
+            .write()
+            .map_err(|_| PluginError::ExecutionFailed("Failed to update plugin health".to_string()))?
+            .insert(name, PluginHealth::default());
         Ok(())
     }
 
@@ -377,16 +437,19 @@ impl PluginRegistry {
     pub fn dispatch_event(&self, event: &ExecutionEvent, context: &mut EventContext) {
         debug!("Dispatching event to {} plugins", self.plugins.len());
 
-        for (name, plugin_arc) in &self.plugins {
-            if let Ok(mut plugin) = plugin_arc.write() {
-                if plugin.manifest().capabilities.hooks_execution {
-                    match plugin.plugin_mut().on_event(event, context) {
-                        Ok(_) => debug!("Plugin '{}' handled event successfully", name),
-                        Err(e) => warn!("Plugin '{}' error handling event: {}", name, e),
-                    }
+        let names: Vec<String> = self.plugins.keys().cloned().collect();
+        for name in names {
+            let Some(plugin_arc) = self.plugins.get(&name) else { continue };
+            let mut health = match self.health.write() {
+                Ok(health) => health,
+                Err(_) => {
+                    warn!("Failed to acquire plugin health lock for '{}'", name);
+                    continue;
                 }
-            } else {
-                warn!("Failed to acquire write lock for plugin '{}'", name);
+            };
+            let outcome = self.run_hook_with_policy(&mut health, &name, plugin_arc, event, context);
+            if let Err(err) = outcome {
+                warn!("Plugin '{}' error handling event: {}", name, err);
             }
         }
     }
@@ -433,6 +496,9 @@ impl PluginRegistry {
 
         // Remove old plugin
         self.plugins.remove(name);
+        if let Ok(mut health) = self.health.write() {
+            health.remove(name);
+        }
 
         // Load new version
         match self.loader.load_from_manifest(&manifest_path) {
@@ -457,6 +523,9 @@ impl PluginRegistry {
     pub fn unload_all(&mut self) {
         info!("Unloading all plugins");
         self.plugins.clear();
+        if let Ok(mut health) = self.health.write() {
+            health.clear();
+        }
     }
 
     /// Get plugin statistics
@@ -478,6 +547,19 @@ impl PluginRegistry {
                 }
                 if caps.supports_hot_reload {
                     stats.supports_hot_reload += 1;
+                }
+                if let Some(health) = self
+                    .health
+                    .read()
+                    .ok()
+                    .and_then(|health| health.get(plugin.manifest().name.as_str()).cloned())
+                {
+                    stats.plugin_failures += health.total_failures;
+                    stats.plugin_timeouts += health.total_timeouts;
+                    stats.plugin_panics += health.total_panics;
+                    if health.circuit_open {
+                        stats.open_circuits += 1;
+                    }
                 }
             }
         }
@@ -516,57 +598,280 @@ impl PluginRegistry {
 
     /// Execute a plugin-provided command, if any plugin declares it.
     pub fn execute_command(&self, command: &str, args: &[String]) -> PluginResult<Option<String>> {
-        for (name, plugin_arc) in &self.plugins {
-            let mut plugin = plugin_arc.write().map_err(|_| {
-                PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
-            })?;
-
-            if !plugin.manifest().capabilities.provides_commands {
-                continue;
-            }
-
-            if !plugin
-                .plugin()
-                .commands()
-                .iter()
-                .any(|cmd| cmd.name == command)
+        let names: Vec<String> = self.plugins.keys().cloned().collect();
+        for name in names {
+            let Some(plugin_arc) = self.plugins.get(&name) else { continue };
             {
-                continue;
+                let plugin = plugin_arc.read().map_err(|_| {
+                    PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
+                })?;
+                if !plugin.manifest().capabilities.provides_commands {
+                    continue;
+                }
+                if !plugin.plugin().commands().iter().any(|cmd| cmd.name == command) {
+                    continue;
+                }
             }
 
-            return plugin.plugin_mut().execute_command(command, args).map(Some);
+            let mut health = self.health.write().map_err(|_| {
+                PluginError::ExecutionFailed("Failed to update plugin health".to_string())
+            })?;
+            let result = self.run_command_with_policy(&mut health, &name, plugin_arc, command, args)?;
+            return Ok(Some(result));
         }
 
         Ok(None)
     }
 
     pub fn format_output(&self, formatter: &str, data: &str) -> PluginResult<Option<String>> {
-        for (name, plugin_arc) in &self.plugins {
-            let plugin = plugin_arc.read().map_err(|_| {
-                PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
-            })?;
-
-            if !plugin.manifest().capabilities.provides_formatters {
-                continue;
-            }
-
-            if !plugin
-                .plugin()
-                .formatters()
-                .iter()
-                .any(|fmt| fmt.name == formatter)
+        let names: Vec<String> = self.plugins.keys().cloned().collect();
+        for name in names {
+            let Some(plugin_arc) = self.plugins.get(&name) else { continue };
             {
-                continue;
+                let plugin = plugin_arc.read().map_err(|_| {
+                    PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
+                })?;
+                if !plugin.manifest().capabilities.provides_formatters {
+                    continue;
+                }
+                if !plugin.plugin().formatters().iter().any(|fmt| fmt.name == formatter) {
+                    continue;
+                }
             }
 
-            drop(plugin);
-            let plugin = plugin_arc.write().map_err(|_| {
-                PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
+            let mut health = self.health.write().map_err(|_| {
+                PluginError::ExecutionFailed("Failed to update plugin health".to_string())
             })?;
-            return plugin.plugin().format_output(formatter, data).map(Some);
+            let result =
+                self.run_formatter_with_policy(&mut health, &name, plugin_arc, formatter, data)?;
+            return Ok(Some(result));
         }
 
         Ok(None)
+    }
+
+    fn run_hook_with_policy(
+        &self,
+        health: &mut HashMap<String, PluginHealth>,
+        name: &str,
+        plugin_arc: &Arc<RwLock<LoadedPlugin>>,
+        event: &ExecutionEvent,
+        context: &mut EventContext,
+    ) -> PluginResult<()> {
+        if Self::circuit_open(health, name) {
+            Self::push_telemetry(
+                context,
+                name,
+                PluginInvocationKind::Hook,
+                PluginInvocationOutcome::SkippedCircuitOpen,
+                0,
+                "Plugin hook skipped because the circuit breaker is open.".to_string(),
+            );
+            return Ok(());
+        }
+
+        let start = Instant::now();
+        let result = {
+            let mut plugin = plugin_arc.write().map_err(|_| {
+                PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
+            })?;
+            catch_unwind(AssertUnwindSafe(|| plugin.plugin_mut().on_event(event, context)))
+        };
+        self.record_outcome(
+            health,
+            Some(context),
+            name,
+            PluginInvocationKind::Hook,
+            self.policy.hook_timeout,
+            start.elapsed(),
+            result.map_err(|_| PluginError::ExecutionFailed("Plugin panicked during hook execution".to_string())),
+        )
+    }
+
+    fn run_command_with_policy(
+        &self,
+        health: &mut HashMap<String, PluginHealth>,
+        name: &str,
+        plugin_arc: &Arc<RwLock<LoadedPlugin>>,
+        command: &str,
+        args: &[String],
+    ) -> PluginResult<String> {
+        if Self::circuit_open(health, name) {
+            return Err(PluginError::CircuitOpen(format!(
+                "Plugin '{}' command '{}' skipped because the circuit breaker is open",
+                name, command
+            )));
+        }
+
+        let start = Instant::now();
+        let result = {
+            let mut plugin = plugin_arc.write().map_err(|_| {
+                PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
+            })?;
+            catch_unwind(AssertUnwindSafe(|| plugin.plugin_mut().execute_command(command, args)))
+        };
+        self.record_outcome(
+            health,
+            None,
+            name,
+            PluginInvocationKind::Command,
+            self.policy.command_timeout,
+            start.elapsed(),
+            result.map_err(|_| PluginError::ExecutionFailed("Plugin panicked during command execution".to_string())),
+        )
+    }
+
+    fn run_formatter_with_policy(
+        &self,
+        health: &mut HashMap<String, PluginHealth>,
+        name: &str,
+        plugin_arc: &Arc<RwLock<LoadedPlugin>>,
+        formatter: &str,
+        data: &str,
+    ) -> PluginResult<String> {
+        if Self::circuit_open(health, name) {
+            return Err(PluginError::CircuitOpen(format!(
+                "Plugin '{}' formatter '{}' skipped because the circuit breaker is open",
+                name, formatter
+            )));
+        }
+
+        let start = Instant::now();
+        let result = {
+            let plugin = plugin_arc.write().map_err(|_| {
+                PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
+            })?;
+            catch_unwind(AssertUnwindSafe(|| plugin.plugin().format_output(formatter, data)))
+        };
+        self.record_outcome(
+            health,
+            None,
+            name,
+            PluginInvocationKind::Formatter,
+            self.policy.formatter_timeout,
+            start.elapsed(),
+            result.map_err(|_| PluginError::ExecutionFailed("Plugin panicked during formatter execution".to_string())),
+        )
+    }
+
+    fn record_outcome<T>(
+        &self,
+        health: &mut HashMap<String, PluginHealth>,
+        mut context: Option<&mut EventContext>,
+        name: &str,
+        kind: PluginInvocationKind,
+        timeout: Duration,
+        elapsed: Duration,
+        result: Result<PluginResult<T>, PluginError>,
+    ) -> PluginResult<T> {
+        let state = health.entry(name.to_string()).or_default();
+
+        match result {
+            Err(err) => {
+                state.total_panics += 1;
+                state.total_failures += 1;
+                state.consecutive_failures += 1;
+                state.last_error = Some(err.to_string());
+                if state.consecutive_failures >= self.policy.max_consecutive_failures {
+                    state.circuit_open = true;
+                }
+                if let Some(ctx) = context.as_deref_mut() {
+                    Self::push_telemetry(
+                        ctx,
+                        name,
+                        kind,
+                        PluginInvocationOutcome::Panic,
+                        elapsed.as_millis(),
+                        err.to_string(),
+                    );
+                }
+                Err(err)
+            }
+            Ok(Err(err)) => {
+                state.total_failures += 1;
+                state.consecutive_failures += 1;
+                state.last_error = Some(err.to_string());
+                if state.consecutive_failures >= self.policy.max_consecutive_failures {
+                    state.circuit_open = true;
+                }
+                if let Some(ctx) = context.as_deref_mut() {
+                    Self::push_telemetry(
+                        ctx,
+                        name,
+                        kind,
+                        PluginInvocationOutcome::Failure,
+                        elapsed.as_millis(),
+                        err.to_string(),
+                    );
+                }
+                Err(err)
+            }
+            Ok(Ok(value)) if elapsed > timeout => {
+                state.total_timeouts += 1;
+                state.total_failures += 1;
+                state.timeout_count += 1;
+                state.consecutive_failures += 1;
+                let message = format!(
+                    "Plugin '{}' exceeded the {:?} {:?} budget ({:?})",
+                    name, kind, timeout, elapsed
+                );
+                state.last_error = Some(message.clone());
+                if state.timeout_count >= self.policy.max_timeouts
+                    || state.consecutive_failures >= self.policy.max_consecutive_failures
+                {
+                    state.circuit_open = true;
+                }
+                if let Some(ctx) = context.as_deref_mut() {
+                    Self::push_telemetry(
+                        ctx,
+                        name,
+                        kind,
+                        PluginInvocationOutcome::Timeout,
+                        elapsed.as_millis(),
+                        message.clone(),
+                    );
+                }
+                Err(PluginError::Timeout(message))
+            }
+            Ok(Ok(value)) => {
+                state.consecutive_failures = 0;
+                state.timeout_count = 0;
+                state.circuit_open = false;
+                state.last_error = None;
+                if let Some(ctx) = context.as_deref_mut() {
+                    Self::push_telemetry(
+                        ctx,
+                        name,
+                        kind,
+                        PluginInvocationOutcome::Success,
+                        elapsed.as_millis(),
+                        "Plugin invocation completed successfully.".to_string(),
+                    );
+                }
+                Ok(value)
+            }
+        }
+    }
+
+    fn push_telemetry(
+        context: &mut EventContext,
+        plugin: &str,
+        kind: PluginInvocationKind,
+        outcome: PluginInvocationOutcome,
+        duration_ms: u128,
+        message: String,
+    ) {
+        context.plugin_telemetry.push(PluginTelemetryEvent {
+            plugin: plugin.to_string(),
+            kind,
+            outcome,
+            duration_ms,
+            message,
+        });
+    }
+
+    fn circuit_open(health: &HashMap<String, PluginHealth>, name: &str) -> bool {
+        health.get(name).map(|state| state.circuit_open).unwrap_or(false)
     }
 }
 
@@ -599,6 +904,10 @@ pub struct PluginStatistics {
     pub provides_commands: usize,
     pub provides_formatters: usize,
     pub supports_hot_reload: usize,
+    pub plugin_failures: usize,
+    pub plugin_timeouts: usize,
+    pub plugin_panics: usize,
+    pub open_circuits: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +917,125 @@ pub struct PluginStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::events::{PluginInvocationKind, PluginInvocationOutcome};
+    use crate::plugin::loader::PluginTrustAssessment;
+    use crate::plugin::manifest::{PluginCapabilities, PluginManifest};
+    use crate::plugin::InspectorPlugin;
+    use std::any::Any;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    #[derive(Clone)]
+    enum Behavior {
+        Success,
+        Fail,
+        Sleep(Duration),
+        Panic,
+    }
+
+    struct TestPlugin {
+        manifest: PluginManifest,
+        hook_behavior: Arc<Mutex<VecDeque<Behavior>>>,
+        command_behavior: Arc<Mutex<VecDeque<Behavior>>>,
+    }
+
+    impl TestPlugin {
+        fn new(name: &str, hook_behavior: Vec<Behavior>, command_behavior: Vec<Behavior>) -> Self {
+            Self {
+                manifest: PluginManifest {
+                    name: name.to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "test plugin".to_string(),
+                    author: "test".to_string(),
+                    license: Some("MIT".to_string()),
+                    min_debugger_version: Some("0.1.0".to_string()),
+                    capabilities: PluginCapabilities {
+                        hooks_execution: true,
+                        provides_commands: true,
+                        provides_formatters: false,
+                        supports_hot_reload: true,
+                    },
+                    library: "test.so".to_string(),
+                    dependencies: vec![],
+                    signature: None,
+                },
+                hook_behavior: Arc::new(Mutex::new(hook_behavior.into())),
+                command_behavior: Arc::new(Mutex::new(command_behavior.into())),
+            }
+        }
+
+        fn next_behavior(queue: &Arc<Mutex<VecDeque<Behavior>>>) -> Behavior {
+            queue.lock().unwrap().pop_front().unwrap_or(Behavior::Success)
+        }
+    }
+
+    impl InspectorPlugin for TestPlugin {
+        fn metadata(&self) -> PluginManifest {
+            self.manifest.clone()
+        }
+
+        fn on_event(&mut self, _event: &ExecutionEvent, _context: &mut EventContext) -> PluginResult<()> {
+            match Self::next_behavior(&self.hook_behavior) {
+                Behavior::Success => Ok(()),
+                Behavior::Fail => Err(PluginError::ExecutionFailed("hook failed".to_string())),
+                Behavior::Sleep(duration) => {
+                    thread::sleep(duration);
+                    Ok(())
+                }
+                Behavior::Panic => panic!("hook panic"),
+            }
+        }
+
+        fn commands(&self) -> Vec<PluginCommand> {
+            vec![PluginCommand {
+                name: "test-command".to_string(),
+                description: "test".to_string(),
+                arguments: vec![],
+            }]
+        }
+
+        fn execute_command(&mut self, _command: &str, _args: &[String]) -> PluginResult<String> {
+            match Self::next_behavior(&self.command_behavior) {
+                Behavior::Success => Ok("ok".to_string()),
+                Behavior::Fail => Err(PluginError::ExecutionFailed("command failed".to_string())),
+                Behavior::Sleep(duration) => {
+                    thread::sleep(duration);
+                    Ok("slow".to_string())
+                }
+                Behavior::Panic => panic!("command panic"),
+            }
+        }
+
+        fn prepare_reload(&self) -> PluginResult<Box<dyn Any + Send>> {
+            Ok(Box::new(()))
+        }
+    }
+
+    fn registry_with_plugin_and_policy(
+        plugin: TestPlugin,
+        policy: PluginExecutionPolicy,
+    ) -> PluginRegistry {
+        let temp_dir = std::env::temp_dir().join("soroban-debug-registry-policy-tests");
+        let mut registry = PluginRegistry::with_plugin_dir_trust_and_policy(
+            temp_dir,
+            PluginTrustPolicy::default(),
+            policy,
+        )
+        .unwrap();
+        let manifest = plugin.metadata();
+        let loaded = LoadedPlugin::from_parts_for_tests(
+            Box::new(plugin),
+            PathBuf::from("test.so"),
+            manifest,
+            PluginTrustAssessment {
+                trusted: true,
+                warnings: Vec::new(),
+                signer: None,
+            },
+        );
+        registry.register_plugin(loaded).unwrap();
+        registry
+    }
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -787,5 +1215,123 @@ mod tests {
         assert_eq!(stats.total, 0);
         assert_eq!(stats.hooks_execution, 0);
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn hook_failures_are_contained_and_open_circuit_after_budget() {
+        let plugin = TestPlugin::new(
+            "failing",
+            vec![Behavior::Fail, Behavior::Fail, Behavior::Fail, Behavior::Success],
+            vec![],
+        );
+        let registry = registry_with_plugin_and_policy(
+            plugin,
+            PluginExecutionPolicy {
+                max_consecutive_failures: 3,
+                ..PluginExecutionPolicy::default()
+            },
+        );
+        let mut context = EventContext::new();
+        let event = ExecutionEvent::ExecutionResumed;
+
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+
+        let stats = registry.statistics();
+        assert_eq!(stats.plugin_failures, 3);
+        assert_eq!(stats.open_circuits, 1);
+        assert!(context.plugin_telemetry.iter().any(|entry|
+            entry.outcome == PluginInvocationOutcome::SkippedCircuitOpen
+                && entry.kind == PluginInvocationKind::Hook
+        ));
+    }
+
+    #[test]
+    fn slow_hooks_trigger_timeout_telemetry_and_circuit_breaker() {
+        let plugin = TestPlugin::new(
+            "slow",
+            vec![
+                Behavior::Sleep(Duration::from_millis(20)),
+                Behavior::Sleep(Duration::from_millis(20)),
+                Behavior::Success,
+            ],
+            vec![],
+        );
+        let registry = registry_with_plugin_and_policy(
+            plugin,
+            PluginExecutionPolicy {
+                hook_timeout: Duration::from_millis(5),
+                max_timeouts: 2,
+                ..PluginExecutionPolicy::default()
+            },
+        );
+        let mut context = EventContext::new();
+        let event = ExecutionEvent::ExecutionResumed;
+
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+
+        let stats = registry.statistics();
+        assert_eq!(stats.plugin_timeouts, 2);
+        assert_eq!(stats.open_circuits, 1);
+        assert!(context.plugin_telemetry.iter().any(|entry|
+            entry.outcome == PluginInvocationOutcome::Timeout
+        ));
+    }
+
+    #[test]
+    fn command_failures_return_errors_and_then_trip_circuit() {
+        let plugin = TestPlugin::new(
+            "commandy",
+            vec![],
+            vec![Behavior::Fail, Behavior::Fail, Behavior::Fail, Behavior::Success],
+        );
+        let registry = registry_with_plugin_and_policy(
+            plugin,
+            PluginExecutionPolicy {
+                max_consecutive_failures: 3,
+                ..PluginExecutionPolicy::default()
+            },
+        );
+
+        assert!(registry.execute_command("test-command", &[]).is_err());
+        assert!(registry.execute_command("test-command", &[]).is_err());
+        assert!(registry.execute_command("test-command", &[]).is_err());
+        let err = registry.execute_command("test-command", &[]).unwrap_err();
+        assert!(matches!(err, PluginError::CircuitOpen(_)));
+    }
+
+    #[test]
+    fn successful_hook_resets_failure_streak() {
+        let plugin = TestPlugin::new(
+            "recovering",
+            vec![Behavior::Fail, Behavior::Success, Behavior::Fail, Behavior::Success],
+            vec![],
+        );
+        let registry = registry_with_plugin_and_policy(
+            plugin,
+            PluginExecutionPolicy {
+                max_consecutive_failures: 2,
+                ..PluginExecutionPolicy::default()
+            },
+        );
+        let mut context = EventContext::new();
+        let event = ExecutionEvent::ExecutionResumed;
+
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+        registry.dispatch_event(&event, &mut context);
+
+        let stats = registry.statistics();
+        assert_eq!(stats.open_circuits, 0);
+        assert_eq!(stats.plugin_failures, 2);
+        assert!(context
+            .plugin_telemetry
+            .iter()
+            .any(|entry| entry.outcome == PluginInvocationOutcome::Success));
     }
 }

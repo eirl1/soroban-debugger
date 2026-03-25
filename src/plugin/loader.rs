@@ -13,7 +13,7 @@ pub struct LoadedPlugin {
 
     /// The dynamic library handle
     #[allow(dead_code)]
-    library: libloading::Library,
+    library: Option<libloading::Library>,
 
     /// Path to the plugin library
     path: PathBuf,
@@ -235,7 +235,7 @@ impl PluginLoader {
 
             Ok(LoadedPlugin {
                 plugin,
-                library,
+                library: Some(library),
                 path: library_path.to_path_buf(),
                 manifest: manifest.clone(),
                 trust,
@@ -611,5 +611,23 @@ mod tests {
             assessment.signer.as_ref().map(|s| s.signer.as_str()),
             Some("trusted-signer")
         );
+    }
+}
+
+#[cfg(test)]
+impl LoadedPlugin {
+    pub(crate) fn from_parts_for_tests(
+        plugin: Box<dyn InspectorPlugin>,
+        path: PathBuf,
+        manifest: PluginManifest,
+        trust: PluginTrustAssessment,
+    ) -> Self {
+        Self {
+            plugin,
+            library: None,
+            path,
+            manifest,
+            trust,
+        }
     }
 }

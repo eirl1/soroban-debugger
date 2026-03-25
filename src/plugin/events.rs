@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Events that plugins can hook into during execution
@@ -78,7 +79,10 @@ pub struct EventContext {
     pub is_paused: bool,
 
     /// Custom context data that plugins can use to store state
-    pub custom_data: std::collections::HashMap<String, String>,
+    pub custom_data: HashMap<String, String>,
+
+    /// Plugin execution telemetry accumulated during this dispatch cycle
+    pub plugin_telemetry: Vec<PluginTelemetryEvent>,
 }
 
 impl EventContext {
@@ -87,7 +91,8 @@ impl EventContext {
             stack_depth: 0,
             program_counter: None,
             is_paused: false,
-            custom_data: std::collections::HashMap::new(),
+            custom_data: HashMap::new(),
+            plugin_telemetry: Vec::new(),
         }
     }
 }
@@ -96,4 +101,29 @@ impl Default for EventContext {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginInvocationKind {
+    Hook,
+    Command,
+    Formatter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginInvocationOutcome {
+    Success,
+    Failure,
+    Timeout,
+    SkippedCircuitOpen,
+    Panic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginTelemetryEvent {
+    pub plugin: String,
+    pub kind: PluginInvocationKind,
+    pub outcome: PluginInvocationOutcome,
+    pub duration_ms: u128,
+    pub message: String,
 }

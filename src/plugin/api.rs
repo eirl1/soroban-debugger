@@ -35,6 +35,14 @@ pub enum PluginError {
     /// Trust policy violation
     #[error("Plugin trust policy violation: {0}")]
     TrustViolation(String),
+
+    /// Plugin execution timed out under containment policy
+    #[error("Plugin timeout: {0}")]
+    Timeout(String),
+
+    /// Plugin has been temporarily disabled by the circuit breaker
+    #[error("Plugin circuit breaker open: {0}")]
+    CircuitOpen(String),
 }
 
 /// Custom CLI command that a plugin can provide
