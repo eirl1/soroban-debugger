@@ -236,7 +236,11 @@ fn detects_nested_storage_loops_with_high_confidence() {
     let finding = get_unbounded_iteration_finding(&wasm).unwrap();
 
     assert!(finding.confidence.unwrap_or_default() >= 0.8);
-    assert!(finding.rationale.as_deref().unwrap_or_default().contains("max nesting depth: 2"));
+    assert!(finding
+        .rationale
+        .as_deref()
+        .unwrap_or_default()
+        .contains("max nesting depth: 2"));
 }
 
 #[test]
@@ -327,7 +331,9 @@ fn dynamic_analysis_detects_high_storage_pressure() {
 
     let finding = &unbounded_findings[0];
     assert!(
-        finding.description.contains("Observed high storage-read pressure"),
+        finding
+            .description
+            .contains("Observed high storage-read pressure"),
         "Expected finding description to indicate detection: {}",
         finding.description
     );

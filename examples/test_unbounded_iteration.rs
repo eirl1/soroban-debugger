@@ -26,27 +26,10 @@ fn main() {
                     println!("  Description: {}", finding.description);
 
                     if let Some(confidence) = &finding.confidence {
-                        println!("  Confidence: {:?}", confidence.level);
-                        println!("  Rationale: {}", confidence.rationale);
+                        println!("  Confidence: {:.0}%", confidence * 100.0);
                     }
-
-                    if let Some(context) = &finding.context {
-                        if let Some(depth) = context.loop_nesting_depth {
-                            println!("  Loop Nesting Depth: {}", depth);
-                        }
-
-                        if let Some(pattern) = &context.storage_call_pattern {
-                            println!("  Storage Calls in Loops: {}", pattern.calls_in_loops);
-                            println!(
-                                "  Storage Calls Outside Loops: {}",
-                                pattern.calls_outside_loops
-                            );
-                        }
-
-                        if let Some(cf_info) = &context.control_flow_info {
-                            println!("  Loop Types: {:?}", cf_info.loop_types);
-                            println!("  Conditional Branches: {}", cf_info.conditional_branches);
-                        }
+                    if let Some(rationale) = &finding.rationale {
+                        println!("  Rationale: {}", rationale);
                     }
 
                     println!("  Remediation: {}", finding.remediation);
@@ -137,15 +120,7 @@ mod tests {
             soroban_debugger::analyzer::security::Severity::High
         );
 
-        // Should have confidence metadata
         assert!(finding.confidence.is_some());
-        let confidence = finding.confidence.as_ref().unwrap();
-        assert!(!confidence.rationale.is_empty());
-
-        // Should have context metadata
-        assert!(finding.context.is_some());
-        let context = finding.context.as_ref().unwrap();
-        assert!(context.loop_nesting_depth.is_some());
-        assert!(context.storage_call_pattern.is_some());
+        assert!(finding.rationale.is_some());
     }
 }
