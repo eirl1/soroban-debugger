@@ -3,7 +3,7 @@
 //! This example shows how the enhanced security analyzer can detect
 //! storage-driven loops with improved precision and confidence scoring.
 
-use soroban_debugger::analyzer::security::SecurityAnalyzer;
+use soroban_debugger::analyzer::security::{AnalyzerFilter, SecurityAnalyzer};
 
 fn main() {
     println!("Testing improved unbounded iteration detection...");
@@ -12,7 +12,8 @@ fn main() {
     let wasm_with_storage_loop = create_wasm_with_storage_loop();
 
     let analyzer = SecurityAnalyzer::new();
-    match analyzer.analyze(&wasm_with_storage_loop, None, None) {
+    let filter = AnalyzerFilter::default();
+    match analyzer.analyze(&wasm_with_storage_loop, None, None, &filter) {
         Ok(report) => {
             println!(
                 "Analysis complete. Found {} security issues.",
@@ -97,9 +98,9 @@ mod tests {
     fn test_unbounded_iteration_detection() {
         let wasm = create_wasm_with_storage_loop();
         let analyzer = SecurityAnalyzer::new();
-
+        let filter = AnalyzerFilter::default();
         let report = analyzer
-            .analyze(&wasm, None, None)
+            .analyze(&wasm, None, None, &filter)
             .expect("Analysis should succeed");
 
         // Should find the unbounded iteration issue

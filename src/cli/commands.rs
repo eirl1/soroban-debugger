@@ -1,5 +1,5 @@
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
-use crate::analyzer::security::SecurityAnalyzer;
+use crate::analyzer::security::{AnalyzerFilter, SecurityAnalyzer, Severity};
 use crate::analyzer::symbolic::{SymbolicAnalyzer, SymbolicConfig};
 use crate::cli::args::{
     AnalyzeArgs, CompareArgs, HistoryPruneArgs, InspectArgs, InteractiveArgs, OptimizeArgs,

@@ -890,6 +890,26 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                     inferred: active_frame.is_none(),
                 });
             }
+            DynamicTraceEventKind::CrossContractReturn => {
+                // A return event signals the callee has finished. Clear any pending
+                // cross-call whose frame matches or is broader, so that writes
+                // that occur *after* the callee returns are not flagged.
+                let returning_frame = active_frame.clone();
+                if let Some(ref pending) = pending_cross_call {
+                    let frames_match = match (&pending.frame, &returning_frame) {
+                        (Some(p), Some(r)) => p == r,
+                        // If the return has no depth info, clear conservatively
+                        (_, None) => true,
+                        _ => false,
+                    };
+                    if frames_match {
+                        pending_cross_call = None;
+                    }
+                }
+                if let Some(frame) = active_frame {
+                    last_known_frame = Some(frame);
+                }
+            }
             _ => {
                 if let Some(frame) = active_frame {
                     last_known_frame = Some(frame);
@@ -1504,7 +1524,7 @@ mod tests {
         assert_eq!(findings[0].rule_id, "missing-auth");
         assert!(findings[0]
             .description
-            .contains("1 storage write(s) occurring before any authorization event"));
+            .contains("1 storage write(s) occurring outside authorized scope"));
     }
 
     #[test]
@@ -1582,7 +1602,7 @@ mod tests {
         assert_eq!(findings[0].rule_id, "missing-auth");
         assert!(findings[0]
             .description
-            .contains("2 storage write(s) occurring before any authorization event"));
+            .contains("2 storage write(s) occurring outside authorized scope"));
     }
 
     #[test]

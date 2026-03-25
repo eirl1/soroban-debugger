@@ -466,7 +466,7 @@ mod tests {
             }
         }"#;
         let err = DebugMessage::parse(json).unwrap_err();
-        assert!(err.contains("request.client_version"), "Error should mention missing field: {}", err);
+        assert!(err.contains("client_version"), "Error should mention missing field: {}", err);
     }
 
     #[test]

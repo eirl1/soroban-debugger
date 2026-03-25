@@ -261,3 +261,32 @@ The **newest** N records (by their parsed `date` field, sorted chronologically) 
 
 Records whose `date` field cannot be parsed are **kept** rather than silently dropped, to avoid data loss from formatting differences.
 
+---
+
+## Error Hints and JSON Output
+
+### 25. How do I interpret standardized error hints?
+
+The Soroban Debugger provides standardized remediation hints for most common failures. When an error like an incorrect WASM path or a bad port connection occurs, the debugger will print an actionable diagnostic:
+
+**Example:**
+```
+  × Network/transport error: Failed to connect to 127.0.0.1:9000: Connection refused (os error 61)
+  help: Action: Ensure the remote debug server is online, address is correct, and network firewall permits the connection.
+        Context: The transport connection failed to establish or dropped unexpectedly.
+```
+
+If you specify `--json` or set `SOROBAN_DEBUG_JSON=1`, these hints are also securely placed inside a machine-readable `"hints"` array on the output block, allowing your scripts or testing wrappers to automatically process validation suggestions.
+
+```json
+{
+  "status": "error",
+  "errors": [
+    "Authentication failed: Invalid security token"
+  ],
+  "hints": [
+    "Action: Ensure the shared security token matches the server, and the transport protocol is correct.\nContext: The server rejected communication because authentication wasn't verified."
+  ]
+}
+```
+
