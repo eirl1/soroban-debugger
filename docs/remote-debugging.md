@@ -2,485 +2,258 @@
 
 ## Overview
 
-The Soroban Debugger supports remote debugging, allowing you to debug smart contracts running in CI environments, remote servers, or isolated systems from your local development machine. This enables powerful debugging workflows for production-like scenarios.
+The Soroban Debugger supports remote debugging for CI jobs, isolated hosts, and other non-local environments. Remote mode is powerful, but it should be treated as a security-sensitive control plane: whoever can talk to the debug server can load contracts, inspect state, and drive execution.
+
+This guide focuses on two things:
+
+1. How the feature works.
+2. How to deploy it without making unsafe assumptions about tokens or transport security.
 
 > **Note: Remote client mode is CLI-only.** The `soroban-debug remote` command and TLS configuration are not available through the VS Code extension. The extension spawns and manages the debug server locally as a subprocess. If you need to debug against a remote server from VS Code, see the [VS Code Extension and Remote Mode](#vs-code-extension-and-remote-mode) section below. For a full breakdown of what each surface supports, see the [Feature Matrix](feature-matrix.md#remote-debugging).
 
 ## Architecture
 
-The remote debugging feature consists of three main components:
+Remote debugging has three components:
 
-1. **Debug Server** - Runs on the remote system, hosts the contract execution environment
-2. **Remote Client** - Connects from your local machine to issue debug commands
-3. **Wire Protocol** - JSON-over-TCP communication protocol for debug operations
+1. **Debug Server**: runs where contract execution happens.
+2. **Remote Client**: connects from your workstation or automation.
+3. **Wire Protocol**: line-delimited JSON requests and responses over TCP.
 
 ## Quick Start
 
-### Starting the Debug Server
+### Start a server
 
-On the remote system (or CI environment):
+On the remote system:
 
 ```bash
-# Basic server (no authentication)
+# Only for trusted local development on an isolated machine.
 soroban-debug server --port 9229
 
-# With token authentication
-soroban-debug server --port 9229 --token mySecretToken123
+# Token-protected server on a trusted private network.
+soroban-debug server --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
 
-# With TLS encryption
+# Token + TLS on an untrusted network.
 soroban-debug server --port 9229 \
-  --token mySecretToken123 \
+  --token "$SOROBAN_DEBUG_TOKEN" \
   --tls-cert /path/to/cert.pem \
   --tls-key /path/to/key.pem
 ```
 
-### Connecting from Local Machine
+### Connect from a client
 
 ```bash
-# Connect and execute a function
 soroban-debug remote \
   --remote localhost:9229 \
-  --token mySecretToken123 \
+  --token "$SOROBAN_DEBUG_TOKEN" \
   --contract ./contract.wasm \
   --function increment \
   --args '["user1", 100]'
-
-# Just ping the server
-soroban-debug remote \
-  --remote localhost:9229 \
-  --token mySecretToken123
 ```
 
-## Features
+## Security Model
 
-> **VS Code Extension users:** When you launch a debug session in VS Code, the extension automatically starts `soroban-debug server` as a local subprocess and connects to it. The `port` and `token` fields in `launch.json` configure this local server. You cannot use the extension to connect to a pre-existing remote server — that requires the CLI `remote` command. TLS is not configurable from the extension. If you need TLS or remote-client connectivity, use the CLI directly or see the [VS Code Extension and Remote Mode](#vs-code-extension-and-remote-mode) section.
+### Important assumptions
 
-### Supported Debug Operations
+- A token protects **authentication**, not **confidentiality**.
+- If you run remote debugging without TLS, the traffic should be treated as plaintext.
+- On an untrusted network, a token alone is not sufficient protection.
+- Anyone who captures the token can authenticate until that token is rotated.
 
-The debugger supports all core debugging operations over TCP:
+### Recommended deployment patterns
 
-- **Contract Loading** - Load WASM contracts onto the server
-- **Function Execution** - Execute contract functions with arguments
-- **Breakpoints** - Set, clear, and list function breakpoints
-- **Step Debugging** - Step through execution
-- **State Inspection** - Inspect current execution state, call stack
-- **Storage Access** - Get and set contract storage
-- **Budget Information** - Monitor CPU and memory consumption
-- **Snapshot Loading** - Load network snapshots
+Use one of these patterns:
 
-### Authentication
+1. **Loopback only**: bind or expose the service only to `127.0.0.1`, then use SSH port forwarding.
+2. **Private network boundary**: run the debug server on a non-public subnet and restrict access with firewall rules or security groups.
+3. **TLS termination in front of the server**: place the server behind a reverse proxy, service mesh sidecar, or tunnel that provides authenticated encrypted transport.
+4. **Native TLS in the debugger**: use `--tls-cert` and `--tls-key` when the server itself is directly reachable over an untrusted network.
 
-Token-based authentication prevents unauthorized access:
+### Token handling guidance
+
+- Generate tokens with a cryptographically secure RNG.
+- Prefer at least 32 random bytes encoded as hex.
+- Do not hardcode tokens in committed scripts or `launch.json`.
+- Avoid shell history leaks by passing tokens through environment variables or secret stores instead of typing them inline.
+- Rotate tokens after incident response, staff changes, CI secret exposure, or any long-lived remote-debug session.
+- Scope tokens to the smallest environment possible. Do not reuse one token across staging, CI, and personal workstations.
+
+### Generate a strong token
 
 ```bash
-# Server with token
-soroban-debug server --port 9229 --token "your-secret-token-here"
-
-# Client provides matching token
-soroban-debug remote --remote host:9229 --token "your-secret-token-here"
+openssl rand -hex 32
 ```
 
-### TLS Encryption
+### Safer shell usage
 
-Secure your debug sessions with TLS:
+Prefer:
 
 ```bash
-# Generate self-signed certificate (for testing)
+export SOROBAN_DEBUG_TOKEN="$(openssl rand -hex 32)"
+soroban-debug server --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
+```
+
+Avoid:
+
+```bash
+soroban-debug server --port 9229 --token mySecretToken123
+```
+
+The second form is easy to leak through shell history, process listings, shared transcripts, and copied terminal logs.
+
+## Transport Hardening
+
+### TLS
+
+Use TLS whenever the server is reachable beyond a tightly controlled private boundary.
+
+```bash
 openssl req -x509 -newkey rsa:4096 \
   -keyout key.pem -out cert.pem \
   -days 365 -nodes \
   -subj "/CN=localhost"
 
-# Start server with TLS
 soroban-debug server --port 9229 \
+  --token "$SOROBAN_DEBUG_TOKEN" \
   --tls-cert cert.pem \
-  --tls-key key.pem \
-  --token myToken
+  --tls-key key.pem
 ```
 
-### VS Code Extension and Remote Mode
+### TLS termination
 
-The VS Code extension uses the debug server protocol internally, but does not expose
-the full remote client capability to users:
+If you already have ingress infrastructure, it is often simpler to terminate TLS before the debugger:
 
-| Capability | CLI | VS Code Extension |
-|---|---|---|
-| Start server (listen on port) | `soroban-debug server --port N` | Automatic — extension-managed |
-| Configure server port | `--port N` | `"port"` in `launch.json` |
-| Configure auth token | `--token T` on `server` | `"token"` in `launch.json` |
-| Connect to remote server | `soroban-debug remote --remote host:N` | **Not supported** |
-| TLS encryption | `--tls-cert` / `--tls-key` | **Not supported** |
+- SSH tunnel
+- Nginx / Envoy / HAProxy
+- Kubernetes ingress or service mesh
+- Cloud load balancer with private backend networking
 
-**Workaround for VS Code users who need a remote server:** use an SSH tunnel to
-forward the remote port to your local machine, then configure the extension to
-connect to the local end of the tunnel:
+When doing this:
 
-```bash
-# On the remote machine
-soroban-debug server --port 9229 --token $MY_TOKEN
+- Keep the debugger itself on a private interface.
+- Restrict who can reach the TLS terminator.
+- Treat the segment between terminator and debugger as sensitive internal traffic.
 
-# On your local machine (in a separate terminal)
-ssh -L 9229:localhost:9229 user@remote-host
-```
+### Firewall and network boundaries
 
-Then in your `.vscode/launch.json`:
-```json
-{
-  "type": "soroban",
-  "request": "launch",
-  "name": "Debug via SSH tunnel",
-  "contractPath": "${workspaceFolder}/contract.wasm",
-  "port": 9229,
-  "token": "${env:MY_TOKEN}"
-}
-```
+- Allow only explicitly trusted source IPs.
+- Do not expose the remote debug port directly to the public internet.
+- Prefer short-lived port openings for incident or debugging windows.
+- Remove ingress rules when the debug session ends.
 
-The extension will connect through the tunnel as if the server were local. Note
-that the extension still manages the server subprocess normally — the tunnel
-approach is for pointing the extension at a manually started remote server by
-binding the same port locally.
+## Authentication Behavior
 
-## Wire Protocol
+The server accepts token authentication through the `Authenticate` request. Authentication failures are intentionally generic. Tokens are redacted in debugger logging and should not appear in normal client/server error messages.
 
-The debug protocol uses JSON messages over TCP with line-delimited encoding.
-
-### Protocol Compatibility Matrix
-
-The backend and adapter negotiate a protocol version during the required `Handshake` request.
-If there is no overlap in supported versions, the session fails fast with an actionable error.
-
-| Wire protocol | Backend (`soroban-debug`) | VS Code extension | Notes |
-| --- | --- | --- | --- |
-| 1 | >= 0.1.0 | >= 0.1.0 | Handshake required; highest common version selected |
-
-### Message Format
+Example request shape:
 
 ```json
 {
   "id": 1,
-  "request": { ... }
+  "request": {
+    "type": "Authenticate",
+    "token": "your-token-here"
+  }
 }
 ```
+
+Example response:
 
 ```json
 {
   "id": 1,
-  "response": { ... }
+  "response": {
+    "type": "Authenticated",
+    "success": false,
+    "message": "Authentication failed"
+  }
 }
 ```
 
-### Request Types
+## Supported Operations
 
-#### Handshake (Required)
+The remote protocol supports:
 
-Clients MUST negotiate a compatible protocol version before issuing other debug requests.
+- Contract loading
+- Function execution
+- Breakpoints
+- Step debugging
+- State inspection
+- Storage access
+- Budget inspection
+- Snapshot loading
 
-```json
-{
-  "type": "Handshake",
-  "client_name": "vscode-extension",
-  "client_version": "0.1.0",
-  "protocol_min": 1,
-  "protocol_max": 1
-}
-```
+## Operational Checklist
 
-#### Authenticate
-```json
-{
-  "type": "Authenticate",
-  "token": "your-token-here"
-}
-```
+Before exposing a debug server remotely, confirm all of the following:
 
-#### LoadContract
-```json
-{
-  "type": "LoadContract",
-  "contract_path": "/path/to/contract.wasm"
-}
-```
+- Authentication token enabled.
+- Token generated randomly and stored outside source control.
+- TLS enabled or traffic constrained to a trusted private boundary.
+- Firewall rules limited to known sources.
+- Rotation plan documented.
+- Session owner knows how to revoke the token after the session.
 
-#### Execute
-```json
-{
-  "type": "Execute",
-  "function": "increment",
-  "args": "[\"user1\", 100]"
-}
-```
+## CI and Automation Guidance
 
-#### Step
-```json
-{
-  "type": "Step"
-}
-```
+For CI:
 
-#### SetBreakpoint
-```json
-{
-  "type": "SetBreakpoint",
-  "function": "transfer"
-}
-```
+- Use the platform secret manager, not plaintext workflow YAML.
+- Prefer ephemeral runners and per-job tokens.
+- Tear down the debug server after the job completes.
+- Do not print the token, even masked, unless your CI provider guarantees redaction.
 
-#### Inspect
-```json
-{
-  "type": "Inspect"
-}
-```
-
-#### GetStorage
-```json
-{
-  "type": "GetStorage"
-}
-```
-
-#### GetStack
-```json
-{
-  "type": "GetStack"
-}
-```
-
-#### GetBudget
-```json
-{
-  "type": "GetBudget"
-}
-```
-
-### Response Types
-
-#### HandshakeAck
-```json
-{
-  "type": "HandshakeAck",
-  "server_name": "soroban-debug",
-  "server_version": "0.1.0",
-  "protocol_min": 1,
-  "protocol_max": 1,
-  "selected_version": 1
-}
-```
-
-#### IncompatibleProtocol
-```json
-{
-  "type": "IncompatibleProtocol",
-  "message": "Protocol mismatch: ... Upgrade the older component.",
-  "server_name": "soroban-debug",
-  "server_version": "0.1.0",
-  "protocol_min": 1,
-  "protocol_max": 1
-}
-```
-
-#### Authenticated
-```json
-{
-  "type": "Authenticated",
-  "success": true,
-  "message": "Authentication successful"
-}
-```
-
-#### ContractLoaded
-```json
-{
-  "type": "ContractLoaded",
-  "size": 123456
-}
-```
-
-#### ExecutionResult
-```json
-{
-  "type": "ExecutionResult",
-  "success": true,
-  "output": "Ok(100)",
-  "error": null
-}
-```
-
-#### StepResult
-```json
-{
-  "type": "StepResult",
-  "paused": true,
-  "current_function": "transfer",
-  "step_count": 42
-}
-```
-
-#### InspectionResult
-```json
-{
-  "type": "InspectionResult",
-  "function": "transfer",
-  "step_count": 42,
-  "paused": true,
-  "call_stack": ["main", "transfer", "validate"]
-}
-```
-
-## Use Cases
-
-### CI/CD Debugging
-
-Debug contracts in your CI pipeline:
+Example:
 
 ```yaml
-# .github/workflows/debug.yml
 steps:
   - name: Start Debug Server
     run: |
-      soroban-debug server --port 9229 --token ${{ secrets.DEBUG_TOKEN }} &
+      soroban-debug server --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
       sleep 2
 
-  - name: Debug Contract
+  - name: Remote Debug
     run: |
       soroban-debug remote \
         --remote localhost:9229 \
-        --token ${{ secrets.DEBUG_TOKEN }} \
+        --token "${{ secrets.DEBUG_TOKEN }}" \
         --contract ./target/wasm32-unknown-unknown/release/contract.wasm \
         --function test_function \
         --args '[1, 2, 3]'
 ```
 
-### Remote Server Debugging
-
-Debug contracts on staging/production environments:
-
-```bash
-# On remote server
-ssh user@staging-server
-soroban-debug server --port 9229 --token $TOKEN --tls-cert cert.pem --tls-key key.pem
-
-# From local machine (with SSH tunnel)
-ssh -L 9229:localhost:9229 user@staging-server
-soroban-debug remote --remote localhost:9229 --token $TOKEN --contract local.wasm
-```
-
-### Team Debugging Sessions
-
-Multiple developers can connect to the same debug server:
-
-```bash
-# Team member starts server
-soroban-debug server --port 9229 --token team-debug-session
-
-# Other team members connect
-soroban-debug remote --remote team-lead-ip:9229 --token team-debug-session
-```
-
-## Security Best Practices
-
-1. **Always use authentication** in production environments
-2. **Enable TLS** for remote connections over the internet
-3. **Use strong tokens** - Generate cryptographically random tokens
-4. **Firewall rules** - Restrict server port access to known IPs
-5. **Rotate tokens** regularly for long-running servers
-6. **Monitor connections** - Log all connection attempts
-
-### Generating Secure Tokens
-
-```bash
-# Generate a secure random token
-openssl rand -hex 32
-```
-
 ## Troubleshooting
 
-### Connection Refused
+### Authentication failed
 
-```bash
-# Check server is running
-netstat -an | grep 9229
+- Confirm the server and client use the same token value.
+- Check for leading or trailing whitespace.
+- Rotate the token if it may have been copied incorrectly or exposed.
+- If you are using a secret manager, confirm the runtime actually injected the latest value.
 
-# Check firewall allows connections
-sudo ufw allow 9229/tcp
+### Connection refused
 
-# Test basic connectivity
-telnet host 9229
-```
+- Confirm the server is listening on the expected host and port.
+- Check firewall or security group rules.
+- If using an SSH tunnel, verify the local forward is active.
 
-### Authentication Failed
+### TLS handshake errors
 
-- Verify token matches on both server and client
-- Check for whitespace in token strings
-- Ensure token was properly set when starting server
+- Confirm the certificate and key match.
+- Check certificate expiry and trust configuration.
+- If using TLS termination, verify the proxy is forwarding traffic to the correct backend port.
 
-### TLS Handshake Errors
-- Verify certificate and key paths are correct
-- Check certificate hasn't expired
-- Ensure client trusts the certificate (or use self-signed for testing)
+## Notes on Logging
 
-## Advanced Usage
+The debugger redacts authentication tokens in normal request logging and auth-failure surfacing. This is a defense-in-depth measure, not a reason to relax secret handling elsewhere. You should still assume tokens can leak through:
 
-### Custom Protocol Extensions
-
-The debug protocol can be extended with custom request/response types:
-
-```rust
-// Add to src/server/protocol.rs
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum DebugRequest {
-    // ... existing variants ...
-    CustomCommand { data: String },
-}
-```
-
-### Programmatic Client Usage
-
-Use the RemoteClient API directly in Rust:
-
-```rust
-use soroban_debugger::client::RemoteClient;
-
-let mut client = RemoteClient::connect("localhost:9229", Some("token".to_string()))?;
-
-client.load_contract("contract.wasm")?;
-let result = client.execute("increment", Some("[100]"))?;
-println!("Result: {}", result);
-
-client.set_breakpoint("transfer")?;
-client.step()?;
-
-let (function, step_count, paused, stack) = client.inspect()?;
-println!("At function: {:?}, steps: {}", function, step_count);
-```
-
-## Future Enhancements
-
-Planned features for remote debugging:
-
-- [ ] WebSocket support for browser-based debugging
-- [ ] Multi-session support (concurrent debug sessions)
-- [ ] Session recording and replay
-- [ ] Visual debugger UI (web interface)
-- [ ] Performance profiling over network
-- [ ] Distributed debugging (multiple contracts across nodes)
+- shell history
+- copied terminal transcripts
+- process inspection tools
+- CI misconfiguration
+- external reverse-proxy logs
 
 ## Related Documentation
 
-- [Plugin API](plugin-api.md) - Extend debugger with custom plugins
-- [Storage Snapshots](storage-snapshot.md) - Load network state for debugging
-- [Instruction Stepping](instruction-stepping.md) - Low-level instruction debugging
-
-## Contributing
-
-To contribute to remote debugging features:
-
-1. Review the [CONTRIBUTING.md](../CONTRIBUTING.md) guide
-2. Check existing issues tagged `remote-debugging`
-3. Propose enhancements in GitHub Discussions
-4. Submit PRs with tests and documentation
-
-## License
-
-This feature is part of the Soroban Debugger project, licensed under MIT OR Apache-2.0.
+- [Plugin API](plugin-api.md)
+- [Storage Snapshots](storage-snapshot.md)
+- [Instruction Stepping](instruction-stepping.md)

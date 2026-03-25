@@ -56,6 +56,12 @@ impl DebugServer {
             .await
             .map_err(|e| miette::miette!("Failed to bind to {}: {}", addr, e))?;
         info!("Debug server listening on {}", addr);
+        if self.token.is_some() && self.tls_config.is_none() {
+            warn!(
+                "Token authentication is enabled without TLS. Treat this as plaintext transport and \
+                 restrict access to trusted network boundaries or add TLS termination."
+            );
+        }
 
         let acceptor = self
             .tls_config
@@ -115,7 +121,7 @@ impl DebugServer {
                 warn!("Received message without request");
                 continue;
             };
-            info!("Received request: {:?}", request);
+            info!("Received request: {}", summarize_request(&request));
 
             if matches!(request, DebugRequest::Ping) {
                 let response = DebugMessage::response(message.id, DebugResponse::Pong);
@@ -859,4 +865,28 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
         .map_err(|e| miette::miette!("Failed to setup TLS config: {}", e))?;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::protocol::DebugRequest;
+
+    #[test]
+    fn request_summary_redacts_auth_token() {
+        let summary = summarize_request(&DebugRequest::Authenticate {
+            token: "super-secret-token".to_string(),
+        });
+        assert!(summary.contains("<redacted:18 chars>"));
+        assert!(!summary.contains("super-secret-token"));
+    }
+
+    #[test]
+    fn request_summary_redacts_storage_payloads() {
+        let summary = summarize_request(&DebugRequest::SetStorage {
+            storage_json: "{\"token\":\"secret\"}".to_string(),
+        });
+        assert!(summary.contains("<redacted>"));
+        assert!(!summary.contains("secret"));
+    }
 }
