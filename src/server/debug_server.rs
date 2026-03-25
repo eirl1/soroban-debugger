@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
@@ -25,6 +26,7 @@ pub struct DebugServer {
     token: Option<String>,
     tls_config: Option<ServerConfig>,
     pending_execution: Option<PendingExecution>,
+    shutdown: Arc<Notify>,
     contract_wasm: Option<Vec<u8>>,
 }
 
@@ -50,6 +52,7 @@ impl DebugServer {
             token,
             tls_config,
             pending_execution: None,
+            shutdown: Arc::new(Notify::new()),
             contract_wasm: None,
         })
     }
@@ -72,26 +75,40 @@ impl DebugServer {
             .take()
             .map(|cfg| TlsAcceptor::from(Arc::new(cfg)));
 
-        loop {
-            let (stream, addr) = listener
-                .accept()
-                .await
-                .map_err(|e| miette::miette!("Failed to accept connection: {}", e))?;
-            info!("New connection from {}", addr);
+        let shutdown = self.shutdown.clone();
+        tokio::spawn(setup_signal_handlers(shutdown));
 
-            if let Some(ref acceptor) = acceptor {
-                match acceptor.accept(stream).await {
-                    Ok(tls_stream) => {
-                        if let Err(e) = self.handle_single_connection(tls_stream).await {
-                            error!("TLS connection error: {}", e);
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, addr)) => {
+                            info!("New connection from {}", addr);
+                            if let Some(ref acceptor) = acceptor {
+                                match acceptor.accept(stream).await {
+                                    Ok(tls_stream) => {
+                                        if let Err(e) = self.handle_single_connection(tls_stream).await {
+                                            error!("TLS connection error: {}", e);
+                                        }
+                                    }
+                                    Err(e) => error!("TLS accept error: {}", e),
+                                }
+                            } else if let Err(e) = self.handle_single_connection(stream).await {
+                                error!("TCP connection error: {}", e);
+                            }
                         }
+                        Err(e) => error!("Failed to accept connection: {}", e),
                     }
-                    Err(e) => error!("TLS accept error: {}", e),
                 }
-            } else if let Err(e) = self.handle_single_connection(stream).await {
-                error!("TCP connection error: {}", e);
+                _ = self.shutdown.notified() => {
+                    info!("Shutting down debug server");
+                    drop(listener);
+                    break;
+                }
             }
         }
+
+        Ok(())
     }
 
     async fn handle_single_connection<S>(&mut self, stream: S) -> Result<()>
@@ -965,6 +982,32 @@ fn summarize_request(request: &DebugRequest) -> String {
     }
 }
 
+async fn setup_signal_handlers(shutdown: Arc<Notify>) {
+    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+
+    #[cfg(unix)]
+    let mut sigterm = {
+        use tokio::signal::unix::{signal, SignalKind};
+        Box::pin(signal(SignalKind::terminate()).expect("Failed to setup SIGTERM handler"))
+    };
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                info!("Received SIGINT, initiating shutdown");
+                shutdown.notify_one();
+                break;
+            }
+            #[cfg(unix)]
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, initiating shutdown");
+                shutdown.notify_one();
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,4 +1030,42 @@ mod tests {
         assert!(summary.contains("<redacted>"));
         assert!(!summary.contains("secret"));
     }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_on_signal() {
+        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        let shutdown = server.shutdown.clone();
+
+        let server_task = tokio::spawn(async move {
+            let _ = server.run(0);
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        shutdown.notify_one();
+
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            server_task,
+        )
+        .await
+        .expect("Server shutdown timed out")
+        .expect("Server task panicked");
+    }
+
+    #[test]
+    fn test_server_initialization() {
+        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        assert!(server.engine.is_none());
+        assert!(server.token.is_none());
+        assert!(server.tls_config.is_none());
+    }
+
+    #[test]
+    fn test_server_with_token() {
+        let token = "test-token-12345678".to_string();
+        let server = DebugServer::new(Some(token.clone()), None, None)
+            .expect("Failed to create server");
+        assert_eq!(server.token, Some(token));
+    }
 }
+
