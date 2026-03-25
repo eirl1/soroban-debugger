@@ -1045,6 +1045,34 @@ pub struct RemoteArgs {
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
+
+    /// Default request timeout in milliseconds (applies when no per-request override is set)
+    #[arg(long, default_value = "30000")]
+    pub timeout_ms: u64,
+
+    /// Ping request timeout in milliseconds
+    #[arg(long, default_value = "2000")]
+    pub ping_timeout_ms: u64,
+
+    /// Inspect request timeout in milliseconds
+    #[arg(long, default_value = "5000")]
+    pub inspect_timeout_ms: u64,
+
+    /// GetStorage request timeout in milliseconds
+    #[arg(long, default_value = "10000")]
+    pub storage_timeout_ms: u64,
+
+    /// Retry attempts for idempotent operations (Ping/Inspect/GetStorage/etc.)
+    #[arg(long, default_value = "3")]
+    pub retry_attempts: u32,
+
+    /// Base backoff delay in milliseconds for retries
+    #[arg(long, default_value = "200")]
+    pub retry_base_delay_ms: u64,
+
+    /// Maximum backoff delay in milliseconds for retries
+    #[arg(long, default_value = "2000")]
+    pub retry_max_delay_ms: u64,
 }
 
 #[derive(Parser)]

@@ -7,10 +7,17 @@ export interface FunctionRange {
 }
 
 export interface ResolvedBreakpoint {
+  requestedLine: number;
   line: number;
   verified: boolean;
   functionName?: string;
+  reasonCode?: string;
   message?: string;
+  /**
+   * Whether to set a runtime function breakpoint for this source breakpoint.
+   * Source breakpoints can be unverified but still mapped to a function as a best-effort.
+   */
+  setBreakpoint?: boolean;
 }
 
 const FUNCTION_DECL = /^\s*(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/;
@@ -69,26 +76,35 @@ export function resolveSourceBreakpoints(
     const range = ranges.find((candidate) => line >= candidate.startLine && line <= candidate.endLine);
     if (!range) {
       return {
+        requestedLine: line,
         line,
         verified: false,
+        reasonCode: 'HEURISTIC_NO_FUNCTION',
+        setBreakpoint: false,
         message: 'Line is not inside a detectable Rust function'
       };
     }
 
     if (!exportedFunctions.has(range.name)) {
       return {
+        requestedLine: line,
         line,
         verified: false,
         functionName: range.name,
+        reasonCode: 'HEURISTIC_NOT_EXPORTED',
+        setBreakpoint: false,
         message: `Rust function '${range.name}' is not an exported contract entrypoint`
       };
     }
 
     return {
+      requestedLine: line,
       line,
-      verified: true,
+      verified: false,
       functionName: range.name,
-      message: `Mapped to contract function '${range.name}' entry breakpoint`
+      reasonCode: 'HEURISTIC_NO_DWARF',
+      setBreakpoint: true,
+      message: `Heuristic mapping to contract entrypoint '${range.name}' (DWARF source map unavailable)`
     };
   });
 }

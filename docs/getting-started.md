@@ -85,3 +85,11 @@ Inside the interactive shell, you can use commands like:
 - Explore [Source-Level Debugging](source-level-debugging.md) to map WASM back to your Rust code.
 - Learn about [Time-Travel Debugging](remote-debugging.md) to step backward through execution.
 - Check the [FAQ](faq.md) for troubleshooting common issues.
+
+---
+
+## Maintainers
+
+For release readiness gates (CLI + extension + analyzer + benchmarks), follow:
+
+- `docs/release-checklist.md`

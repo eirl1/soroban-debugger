@@ -9,6 +9,7 @@ use crate::server::protocol::{
 };
 use crate::simulator::SnapshotLoader;
 use crate::Result;
+use std::collections::HashSet;
 use std::fs;
 use std::io::BufReader as StdBufReader;
 use std::path::Path;
@@ -24,6 +25,7 @@ pub struct DebugServer {
     token: Option<String>,
     tls_config: Option<ServerConfig>,
     pending_execution: Option<PendingExecution>,
+    contract_wasm: Option<Vec<u8>>,
 }
 
 struct PendingExecution {
@@ -48,6 +50,7 @@ impl DebugServer {
             token,
             tls_config,
             pending_execution: None,
+            contract_wasm: None,
         })
     }
 
@@ -254,6 +257,7 @@ impl DebugServer {
                                 let _ = engine.enable_instruction_debug(&bytes);
                                 self.engine = Some(engine);
                                 self.pending_execution = None;
+                                self.contract_wasm = Some(bytes);
                                 DebugResponse::ContractLoaded {
                                     size: fs::metadata(&contract_path)
                                         .map(|m| m.len() as usize)
@@ -267,6 +271,42 @@ impl DebugServer {
                     }
                     Err(e) => DebugResponse::Error {
                         message: format!("Failed to read contract {:?}: {}", contract_path, e),
+                    },
+                },
+                DebugRequest::ResolveSourceBreakpoints {
+                    source_path,
+                    lines,
+                    exported_functions,
+                } => match (self.engine.as_ref(), self.contract_wasm.as_deref()) {
+                    (Some(engine), Some(wasm_bytes)) => {
+                        if let Some(source_map) = engine.source_map() {
+                            let exported: HashSet<String> =
+                                exported_functions.into_iter().collect();
+                            let breakpoints = source_map.resolve_source_breakpoints(
+                                wasm_bytes,
+                                Path::new(&source_path),
+                                &lines,
+                                &exported,
+                            );
+                            DebugResponse::SourceBreakpointsResolved { breakpoints }
+                        } else {
+                            let breakpoints = lines
+                                .into_iter()
+                                .map(|line| crate::debugger::SourceBreakpointResolution {
+                                    requested_line: line,
+                                    line,
+                                    verified: false,
+                                    function: None,
+                                    reason_code: "NO_DEBUG_INFO".to_string(),
+                                    message:
+                                        "[NO_DEBUG_INFO] Contract is missing DWARF source mappings; rebuild with debug info to bind source breakpoints accurately.".to_string(),
+                                })
+                                .collect();
+                            DebugResponse::SourceBreakpointsResolved { breakpoints }
+                        }
+                    }
+                    _ => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
                     },
                 },
                 DebugRequest::Execute { function, args } => match self.engine.as_mut() {

@@ -1,6 +1,6 @@
 use crate::runtime::executor::ContractExecutor;
 use crate::server::protocol::{DynamicTraceEvent, DynamicTraceEventKind};
-use crate::utils::wasm::analyze_arithmetic_ops;
+use crate::utils::wasm::{parse_instructions, WasmInstruction};
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -237,33 +237,37 @@ impl SecurityRule for ArithmeticCheckRule {
     }
 
     fn analyze_static(&self, wasm_bytes: &[u8]) -> Result<Vec<SecurityFinding>> {
-        Ok(
-            analyze_arithmetic_ops(wasm_bytes)?
-                .into_iter()
-                .map(|analysis| {
-                    let confidence_label = analysis.confidence.label();
-                    let rationale = analysis.rationale;
-                    SecurityFinding {
-                        rule_id: self.name().to_string(),
-                        severity: Severity::Medium,
-                        location: format!(
-                            "Function {} instruction {} (offset {})",
-                            analysis.function_index,
-                            analysis.instruction_index,
-                            analysis.offset
-                        ),
-                        description: format!(
-                            "Potential unchecked arithmetic operation detected: {:?}. Confidence: {}. {}",
-                            analysis.instruction,
-                            confidence_label,
-                            rationale
-                        ),
-                        remediation: "Ensure arithmetic operations are guarded with proper bounds checks or overflow handling.".to_string(),
-                        confidence: Some(analysis.confidence.score()),
-                        rationale: Some(rationale),
-                    }
-                })
-                .collect(),
+        let mut findings = Vec::new();
+        let instructions = parse_instructions(wasm_bytes);
+
+        for (i, instr) in instructions.iter().enumerate() {
+            if Self::is_arithmetic(instr) && !Self::is_guarded(&instructions, i) {
+                findings.push(SecurityFinding {
+                    rule_id: self.name().to_string(),
+                    severity: Severity::Medium,
+                    location: format!("Instruction {}", i),
+                    description: format!("Unchecked arithmetic operation detected: {:?}", instr),
+                    remediation: "Ensure arithmetic operations are guarded with proper bounds checks or overflow handling.".to_string(),
+                    confidence: None,
+                    context: None,
+                });
+            }
+        }
+
+        Ok(findings)
+    }
+}
+
+impl ArithmeticCheckRule {
+    fn is_arithmetic(instr: &WasmInstruction) -> bool {
+        matches!(
+            instr,
+            WasmInstruction::I32Add
+                | WasmInstruction::I32Sub
+                | WasmInstruction::I32Mul
+                | WasmInstruction::I64Add
+                | WasmInstruction::I64Sub
+                | WasmInstruction::I64Mul
         )
     }
 }
@@ -414,7 +418,7 @@ impl SecurityRule for CrossContractImportRule {
             remediation: "Review external call sites for reentrancy and authorization checks."
                 .to_string(),
             confidence: None,
-            rationale: None,
+            context: None,
         }])
     }
 }
@@ -482,20 +486,42 @@ impl SecurityRule for UnboundedIterationRule {
             return Ok(Vec::new());
         }
 
-        Ok(
-            vec![SecurityFinding {
-                rule_id: self.name().to_string(),
-                severity: Severity::High,
-                location: "WASM code section".to_string(),
-                description: format!(
-                    "Detected loop(s) with storage-read host calls ({} storage calls while inside loop).",
-                    analysis.storage_calls_inside_loops
-                ),
-                remediation: "Bound iteration over storage-backed collections (pagination, explicit limits, or capped batch size).".to_string(),
-                confidence: analysis.confidence,
-                rationale: analysis.rationale,
-            }]
-        )
+        let mut finding = SecurityFinding {
+            rule_id: self.name().to_string(),
+            severity: Severity::High,
+            location: "WASM code section".to_string(),
+            description: format!(
+                "Detected loop(s) with storage-read host calls ({} storage calls while inside loop).",
+                analysis.storage_calls_inside_loops
+            ),
+            remediation: "Bound iteration over storage-backed collections (pagination, explicit limits, or capped batch size).".to_string(),
+            confidence: analysis.confidence,
+            context: analysis.context,
+        };
+
+        // Enhance description with additional context if available
+        if let Some(context) = &finding.context {
+            if let Some(pattern) = &context.storage_call_pattern {
+                if pattern.calls_outside_loops > 0 {
+                    finding.description = format!(
+                        "{} Also found {} storage calls outside loops (may indicate mixed access patterns).",
+                        finding.description,
+                        pattern.calls_outside_loops
+                    );
+                }
+            }
+
+            if let Some(depth) = context.loop_nesting_depth {
+                if depth > 1 {
+                    finding.description = format!(
+                        "{} Loop nesting depth: {} (increased complexity).",
+                        finding.description, depth
+                    );
+                }
+            }
+        }
+
+        Ok(vec![finding])
     }
 
     fn analyze_dynamic(
@@ -662,11 +688,26 @@ fn analyze_unbounded_iteration_static(wasm_bytes: &[u8]) -> UnboundedStaticSigna
     signal.rationale = Some(format!(
         "Storage calls in loops: {}, max nesting depth: {}, loop types with calls: {:?}",
         storage_calls_in_loops, signal.max_nesting_depth, loop_types_with_calls
-    ));
-    let _ = conditional_branches;
-    let _ = storage_calls_outside_loops;
-    let _ = loop_types_with_calls;
-    signal.confidence = Some(confidence);
+    );
+
+    signal.confidence = Some(FindingConfidence {
+        level: confidence_level,
+        rationale: confidence_rationale,
+    });
+
+    signal.context = Some(FindingContext {
+        control_flow_info: Some(ControlFlowContext {
+            loop_types: signal.loop_types.clone(),
+            block_types: vec!["block".to_string()],
+            conditional_branches,
+        }),
+        storage_call_pattern: Some(StorageCallPattern {
+            calls_in_loops: storage_calls_in_loops,
+            calls_outside_loops: storage_calls_outside_loops,
+            loop_types_with_calls: loop_types_with_calls.into_iter().collect(),
+        }),
+        loop_nesting_depth: Some(signal.max_nesting_depth),
+    });
 
     signal.suspicious = storage_calls_in_loops > 0;
     signal
@@ -1141,6 +1182,194 @@ mod tests {
             "only the valid StrKey should be flagged; the garbage token must be ignored"
         );
         assert!(findings[0].description.contains(&valid_addr));
+    }
+
+    // -----------------------------------------------------------------------
+    // ArithmeticCheckRule / is_guarded — fixture tests
+    // -----------------------------------------------------------------------
+
+    /// Bare arithmetic with no surrounding instructions must be flagged.
+    #[test]
+    fn is_guarded_false_for_isolated_arithmetic() {
+        let instrs = vec![WasmInstruction::I32Add];
+        assert!(!ArithmeticCheckRule::is_guarded(&instrs, 0));
+    }
+
+    /// A `BrIf` immediately *after* the arithmetic is a valid guard.
+    #[test]
+    fn is_guarded_true_for_brif_after_arithmetic() {
+        let instrs = vec![WasmInstruction::I32Add, WasmInstruction::BrIf];
+        assert!(ArithmeticCheckRule::is_guarded(&instrs, 0));
+    }
+
+    /// An `If` immediately *after* the arithmetic is a valid guard.
+    #[test]
+    fn is_guarded_true_for_if_after_arithmetic() {
+        let instrs = vec![WasmInstruction::I32Add, WasmInstruction::If];
+        assert!(ArithmeticCheckRule::is_guarded(&instrs, 0));
+    }
+
+    /// A `BrIf` within the 3-instruction lookahead window (with one
+    /// intermediate instruction between) is still a valid guard.
+    #[test]
+    fn is_guarded_true_for_brif_within_lookahead_window() {
+        // e.g.: i32.add  ->  i32.const (compare setup)  ->  br_if
+        let instrs = vec![
+            WasmInstruction::I32Add,
+            WasmInstruction::Unknown(0x41),
+            WasmInstruction::BrIf,
+        ];
+        assert!(ArithmeticCheckRule::is_guarded(&instrs, 0));
+    }
+
+    /// A `BrIf` that falls *outside* the 3-instruction lookahead must NOT
+    /// suppress the finding — the guard is too far away to be meaningful.
+    #[test]
+    fn is_guarded_false_when_brif_beyond_lookahead() {
+        // idx=0, window covers idx+1..idx+4 (indices 1, 2, 3).
+        // BrIf is at index 4, which is outside the window.
+        let instrs = vec![
+            WasmInstruction::I32Add,        // idx 0
+            WasmInstruction::Unknown(0x41), // idx 1
+            WasmInstruction::Unknown(0x41), // idx 2
+            WasmInstruction::Unknown(0x41), // idx 3
+            WasmInstruction::BrIf,          // idx 4 — outside window
+        ];
+        assert!(!ArithmeticCheckRule::is_guarded(&instrs, 0));
+    }
+
+    /// **Key regression** — a `BrIf` that appears *before* the arithmetic
+    /// (guarding something else entirely) must NOT suppress the finding.
+    ///
+    /// The old code used `idx.saturating_sub(2)` as the start, so a BrIf
+    /// two slots before the arithmetic would incorrectly return true.
+    #[test]
+    fn is_guarded_false_for_brif_only_before_arithmetic() {
+        let instrs = vec![WasmInstruction::BrIf, WasmInstruction::I32Add];
+        assert!(!ArithmeticCheckRule::is_guarded(&instrs, 1));
+    }
+
+    /// **Key regression** — a `Call` anywhere near the arithmetic must NOT
+    /// suppress the finding.  An unrelated call (logger, helper, etc.) is not
+    /// a bounds check.
+    #[test]
+    fn is_guarded_false_for_nearby_unrelated_call() {
+        // Call before:
+        let before = vec![WasmInstruction::Call, WasmInstruction::I32Add];
+        assert!(!ArithmeticCheckRule::is_guarded(&before, 1));
+
+        // Call after:
+        let after = vec![WasmInstruction::I32Add, WasmInstruction::Call];
+        assert!(!ArithmeticCheckRule::is_guarded(&after, 0));
+
+        // Call on both sides:
+        let both = vec![
+            WasmInstruction::Call,
+            WasmInstruction::I32Mul,
+            WasmInstruction::Call,
+        ];
+        assert!(!ArithmeticCheckRule::is_guarded(&both, 1));
+    }
+
+    /// A `Call` between the arithmetic and a `BrIf` must not block the guard
+    /// from being recognised — only the presence of If/BrIf matters.
+    #[test]
+    fn is_guarded_true_when_brif_follows_call_after_arithmetic() {
+        // i32.add  ->  call (side-effect)  ->  br_if (checks result)
+        let instrs = vec![
+            WasmInstruction::I32Add,
+            WasmInstruction::Call,
+            WasmInstruction::BrIf,
+        ];
+        assert!(ArithmeticCheckRule::is_guarded(&instrs, 0));
+    }
+
+    /// Arithmetic at the very last position of the slice must not panic and
+    /// must be reported as unguarded (no instructions ahead to look at).
+    #[test]
+    fn is_guarded_false_at_end_of_slice() {
+        let instrs = vec![WasmInstruction::Unknown(0x41), WasmInstruction::I64Add];
+        assert!(!ArithmeticCheckRule::is_guarded(&instrs, 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // ReentrancyPatternRule — call-frame correlation tests
+    // -----------------------------------------------------------------------
+
+    fn make_event(seq: usize, kind: DynamicTraceEventKind, depth: u32) -> DynamicTraceEvent {
+        DynamicTraceEvent {
+            sequence: seq,
+            kind,
+            message: String::new(),
+            function: None,
+            storage_key: None,
+            storage_value: None,
+            call_depth: depth,
+        }
+    }
+
+    /// Safe pattern: cross-contract call at depth 0, storage write happens
+    /// inside the callee at depth 1 (different frame) — must produce NO finding.
+    #[test]
+    fn reentrancy_no_finding_for_write_in_callee_frame() {
+        let trace = vec![
+            make_event(0, DynamicTraceEventKind::CrossContractCall, 0),
+            make_event(1, DynamicTraceEventKind::StorageWrite, 1),
+        ];
+        assert!(
+            analyze_reentrancy_dynamic(&trace).is_empty(),
+            "write in callee frame must not be flagged as reentrancy"
+        );
+    }
+
+    /// Safe pattern: cross-contract call at depth 0, callee returns (depth drops
+    /// back to 0 via a FunctionCall event), then a write at depth 0 in a later
+    /// unrelated function — must produce NO finding.
+    #[test]
+    fn reentrancy_no_finding_for_write_after_call_returned() {
+        let trace = vec![
+            make_event(0, DynamicTraceEventKind::CrossContractCall, 0),
+            make_event(1, DynamicTraceEventKind::StorageWrite, 1),
+            make_event(2, DynamicTraceEventKind::CrossContractReturn, 0),
+            make_event(3, DynamicTraceEventKind::StorageWrite, 0),
+        ];
+        assert!(
+            analyze_reentrancy_dynamic(&trace).is_empty(),
+            "write after call has returned must not be flagged"
+        );
+    }
+
+    /// Safe pattern: callee writes at depth 1, then caller writes at depth 0
+    /// after an explicit CrossContractReturn — must produce NO finding.
+    #[test]
+    fn reentrancy_no_finding_for_write_after_callee_write_and_return() {
+        let trace = vec![
+            make_event(0, DynamicTraceEventKind::CrossContractCall, 0),
+            make_event(1, DynamicTraceEventKind::StorageWrite, 1),
+            make_event(2, DynamicTraceEventKind::CrossContractReturn, 0),
+            make_event(3, DynamicTraceEventKind::StorageWrite, 0),
+        ];
+        assert!(
+            analyze_reentrancy_dynamic(&trace).is_empty(),
+            "write at depth 0 after explicit return must not be flagged"
+        );
+    }
+
+    /// Unsafe pattern: cross-contract call at depth 0, storage write also at
+    /// depth 0 (same frame, after the call) — must produce exactly one finding.
+    #[test]
+    fn reentrancy_finding_for_write_in_same_frame_after_cross_call() {
+        let trace = vec![
+            make_event(0, DynamicTraceEventKind::CrossContractCall, 0),
+            make_event(1, DynamicTraceEventKind::StorageWrite, 0),
+        ];
+        let findings = analyze_reentrancy_dynamic(&trace);
+        assert_eq!(
+            findings.len(),
+            1,
+            "write in same frame after cross-contract call must be flagged"
+        );
+        assert_eq!(findings[0].rule_id, "reentrancy-pattern");
     }
 
     // Pre-existing tests (unchanged)

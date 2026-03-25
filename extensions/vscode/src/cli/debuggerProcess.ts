@@ -60,15 +60,9 @@ type DebugRequest =
   | { type: 'Continue' }
   | { type: 'Inspect' }
   | { type: 'GetStorage' }
-  | {
-      type: 'SetBreakpoint';
-      id: string;
-      function: string;
-      condition?: string;
-      hit_condition?: string;
-      log_message?: string;
-    }
-  | { type: 'ClearBreakpoint'; id: string }
+  | { type: 'SetBreakpoint'; function: string }
+  | { type: 'ClearBreakpoint'; function: string }
+  | { type: 'ResolveSourceBreakpoints'; source_path: string; lines: number[]; exported_functions: string[] }
   | { type: 'Evaluate'; expression: string; frame_id?: number }
   | { type: 'Ping' }
   | { type: 'Disconnect' }
@@ -87,18 +81,9 @@ type DebugResponse =
   | { type: 'InspectionResult'; function?: string; args?: string; step_count: number; paused: boolean; call_stack: string[] }
   | { type: 'StorageState'; storage_json: string }
   | { type: 'SnapshotLoaded'; summary: string }
-  | { type: 'BreakpointSet'; id: string; function: string }
-  | { type: 'BreakpointCleared'; id: string }
-  | {
-      type: 'BreakpointsList';
-      breakpoints: Array<{
-        id: string;
-        function: string;
-        condition?: string;
-        hit_condition?: string;
-        log_message?: string;
-      }>;
-    }
+  | { type: 'BreakpointSet'; function: string }
+  | { type: 'BreakpointCleared'; function: string }
+  | { type: 'SourceBreakpointsResolved'; breakpoints: Array<{ requested_line: number; line: number; verified: boolean; function?: string; reason_code: string; message: string }> }
   | { type: 'EvaluateResult'; result: string; result_type?: string; variables_reference: number }
   | {
       type: 'Capabilities';
@@ -411,6 +396,34 @@ export class DebuggerProcess {
     }
 
     return functions;
+  }
+
+  async resolveSourceBreakpoints(
+    sourcePath: string,
+    lines: number[],
+    exportedFunctions: Set<string>,
+    options?: RequestOptions
+  ): Promise<Array<{ requestedLine: number; line: number; verified: boolean; functionName?: string; reasonCode: string; message: string }>> {
+    const response = await this.sendRequest(
+      {
+        type: 'ResolveSourceBreakpoints',
+        source_path: sourcePath,
+        lines,
+        exported_functions: Array.from(exportedFunctions)
+      },
+      options
+    );
+
+    this.expectResponse(response, 'SourceBreakpointsResolved');
+
+    return response.breakpoints.map((bp) => ({
+      requestedLine: bp.requested_line,
+      line: bp.line,
+      verified: bp.verified,
+      functionName: bp.function,
+      reasonCode: bp.reason_code,
+      message: bp.message
+    }));
   }
 
   async stop(): Promise<void> {

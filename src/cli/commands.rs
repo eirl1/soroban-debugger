@@ -1,10 +1,9 @@
-use crate::analyzer::symbolic::SymbolicConfig;
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
 use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
 use crate::cli::args::{
     AnalyzeArgs, CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RemoteArgs,
-    ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, SymbolicProfile,
-    TuiArgs, UpgradeCheckArgs, Verbosity,
+    ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, TuiArgs,
+    UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
@@ -83,18 +82,6 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
         format!("Function: {}", report.function),
         format!("Paths explored: {}", report.paths_explored),
         format!("Panics found: {}", report.panics_found),
-        format!(
-            "Budget: path_cap={}, input_combination_cap={}, timeout={}s",
-            report.metadata.config.max_paths,
-            report.metadata.config.max_input_combinations,
-            report.metadata.config.timeout_secs
-        ),
-        format!(
-            "Input combinations: generated={}, attempted={}, distinct_paths={}",
-            report.metadata.generated_input_combinations,
-            report.metadata.attempted_input_combinations,
-            report.metadata.distinct_paths_recorded
-        ),
     ];
 
     if report.metadata.truncation_reasons.is_empty() {
@@ -220,9 +207,9 @@ fn render_security_report(output: &AnalyzeCommandOutput) -> String {
 
 /// Run instruction-level stepping mode.
 fn run_instruction_stepping(
-    engine: &mut DebuggerEngine,
-    function: &str,
-    args: Option<&str>,
+    _engine: &mut DebuggerEngine,
+    _function: &str,
+    _args: Option<&str>,
 ) -> Result<()> {
     logging::log_display(
         "\n=== Instruction Stepping Mode ===",
@@ -1752,7 +1739,7 @@ pub fn server(args: ServerArgs) -> Result<()> {
         "Starting remote debug server on port {}",
         args.port
     ));
-    if let Some(token) = &args.token {
+    if args.token.is_some() {
         print_info("Token authentication enabled");
         if token.trim().len() < 16 {
             print_warning(
@@ -1786,7 +1773,21 @@ pub fn server(args: ServerArgs) -> Result<()> {
 /// Connect to remote debug server
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Connecting to remote debugger at {}", args.remote));
-    let mut client = crate::client::RemoteClient::connect(&args.remote, args.token.clone())?;
+    let config = crate::client::remote_client::RemoteClientConfig {
+        timeouts: crate::client::remote_client::RequestTimeouts {
+            default: std::time::Duration::from_millis(args.timeout_ms),
+            ping: std::time::Duration::from_millis(args.ping_timeout_ms),
+            inspect: std::time::Duration::from_millis(args.inspect_timeout_ms),
+            get_storage: std::time::Duration::from_millis(args.storage_timeout_ms),
+        },
+        retry: crate::client::remote_client::RetryPolicy {
+            max_attempts: args.retry_attempts as usize,
+            base_delay: std::time::Duration::from_millis(args.retry_base_delay_ms),
+            max_delay: std::time::Duration::from_millis(args.retry_max_delay_ms),
+        },
+    };
+    let mut client =
+        crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
 
     if let Some(contract) = &args.contract {
         print_info(format!("Loading contract: {:?}", contract));
@@ -2127,7 +2128,10 @@ pub fn show_budget_trend(
             "Regression params: threshold>{:.1}% lookback={} smoothing={}",
             regression.threshold_pct, regression.lookback, regression.smoothing_window
         );
-        println!("Runs: {}   Range: {} -> {}", stats.count, stats.first_date, stats.last_date);
+        println!(
+            "Runs: {}   Range: {} -> {}",
+            stats.count, stats.first_date, stats.last_date
+        );
         println!(
             "CPU insns: last={}  avg={}  min={}  max={}",
             crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.last_cpu),

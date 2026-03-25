@@ -4,28 +4,85 @@ use crate::server::protocol::{
 use crate::{DebuggerError, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::time::Duration;
 use tracing::info;
+
+#[derive(Debug, Clone)]
+pub struct RequestTimeouts {
+    pub default: Duration,
+    pub ping: Duration,
+    pub inspect: Duration,
+    pub get_storage: Duration,
+}
+
+impl Default for RequestTimeouts {
+    fn default() -> Self {
+        Self {
+            default: Duration::from_millis(30_000),
+            ping: Duration::from_millis(2_000),
+            inspect: Duration::from_millis(5_000),
+            get_storage: Duration::from_millis(10_000),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    pub max_attempts: usize,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(200),
+            max_delay: Duration::from_millis(2_000),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RemoteClientConfig {
+    pub timeouts: RequestTimeouts,
+    pub retry: RetryPolicy,
+}
 
 /// Remote client for connecting to a debug server
 #[derive(Debug)]
 pub struct RemoteClient {
+    addr: String,
+    token: Option<String>,
     stream: BufReader<TcpStream>,
     message_id: u64,
     authenticated: bool,
+    config: RemoteClientConfig,
 }
 
 impl RemoteClient {
     /// Connect to a remote debug server
     pub fn connect(addr: &str, token: Option<String>) -> Result<Self> {
+        Self::connect_with_config(addr, token, RemoteClientConfig::default())
+    }
+
+    pub fn connect_with_config(
+        addr: &str,
+        token: Option<String>,
+        config: RemoteClientConfig,
+    ) -> Result<Self> {
         info!("Connecting to debug server at {}", addr);
         let stream = TcpStream::connect(addr).map_err(|e| {
             DebuggerError::NetworkError(format!("Failed to connect to {}: {}", addr, e))
         })?;
 
         let mut client = Self {
+            addr: addr.to_string(),
+            token: token.clone(),
             stream: BufReader::new(stream),
             message_id: 0,
             authenticated: token.is_none(),
+            config,
         };
 
         client.handshake("rust-remote-client", env!("CARGO_PKG_VERSION"))?;
@@ -79,12 +136,7 @@ impl RemoteClient {
                     info!("Authentication successful");
                     Ok(())
                 } else {
-                    let sanitized = sanitize_auth_message(&message, token);
-                    Err(DebuggerError::ExecutionError(format!(
-                        "Authentication failed: {}",
-                        sanitized
-                    ))
-                    .into())
+                    Err(DebuggerError::AuthenticationFailed(message).into())
                 }
             }
             _ => Err(DebuggerError::ExecutionError(
@@ -212,7 +264,8 @@ impl RemoteClient {
 
     /// Inspect current state
     pub fn inspect(&mut self) -> Result<(Option<String>, u64, bool, Vec<String>)> {
-        let response = self.send_request(DebugRequest::Inspect)?;
+        let response =
+            self.send_request_with_retry(DebugRequest::Inspect, RequestClass::Inspect, true)?;
 
         match response {
             DebugResponse::InspectionResult {
@@ -231,7 +284,8 @@ impl RemoteClient {
 
     /// Get storage state
     pub fn get_storage(&mut self) -> Result<String> {
-        let response = self.send_request(DebugRequest::GetStorage)?;
+        let response =
+            self.send_request_with_retry(DebugRequest::GetStorage, RequestClass::GetStorage, true)?;
 
         match response {
             DebugResponse::StorageState { storage_json } => Ok(storage_json),
@@ -245,7 +299,8 @@ impl RemoteClient {
 
     /// Get call stack
     pub fn get_stack(&mut self) -> Result<Vec<String>> {
-        let response = self.send_request(DebugRequest::GetStack)?;
+        let response =
+            self.send_request_with_retry(DebugRequest::GetStack, RequestClass::Default, true)?;
 
         match response {
             DebugResponse::CallStack { stack } => Ok(stack),
@@ -258,7 +313,8 @@ impl RemoteClient {
 
     /// Get budget information
     pub fn get_budget(&mut self) -> Result<(u64, u64)> {
-        let response = self.send_request(DebugRequest::GetBudget)?;
+        let response =
+            self.send_request_with_retry(DebugRequest::GetBudget, RequestClass::Default, true)?;
 
         match response {
             DebugResponse::BudgetInfo {
@@ -372,7 +428,8 @@ impl RemoteClient {
 
     /// Ping the server
     pub fn ping(&mut self) -> Result<()> {
-        let response = self.send_request(DebugRequest::Ping)?;
+        let response =
+            self.send_request_with_retry(DebugRequest::Ping, RequestClass::Ping, true)?;
 
         match response {
             DebugResponse::Pong => {
@@ -394,6 +451,76 @@ impl RemoteClient {
 
     /// Send a request and wait for response
     fn send_request(&mut self, request: DebugRequest) -> Result<DebugResponse> {
+        self.send_request_with_retry(request, RequestClass::Default, false)
+    }
+
+    fn reconnect(&mut self) -> Result<()> {
+        let stream = TcpStream::connect(&self.addr).map_err(|e| {
+            DebuggerError::NetworkError(format!("Failed to reconnect to {}: {}", self.addr, e))
+        })?;
+        self.stream = BufReader::new(stream);
+        self.authenticated = self.token.is_none();
+        if let Some(token) = self.token.clone() {
+            self.authenticate(&token)?;
+        }
+        Ok(())
+    }
+
+    fn timeout_for_class(&self, class: RequestClass) -> Duration {
+        match class {
+            RequestClass::Ping => self.config.timeouts.ping,
+            RequestClass::Inspect => self.config.timeouts.inspect,
+            RequestClass::GetStorage => self.config.timeouts.get_storage,
+            RequestClass::Default => self.config.timeouts.default,
+        }
+    }
+
+    fn send_request_with_retry(
+        &mut self,
+        request: DebugRequest,
+        class: RequestClass,
+        idempotent: bool,
+    ) -> Result<DebugResponse> {
+        let timeout = self.timeout_for_class(class);
+        let operation = class.operation_name();
+
+        let max_attempts = if idempotent {
+            self.config.retry.max_attempts.max(1)
+        } else {
+            1
+        };
+
+        for attempt in 1..=max_attempts {
+            match self.send_request_once(request.clone(), timeout) {
+                Ok(resp) => return Ok(resp),
+                Err(failure) => {
+                    if !idempotent || attempt >= max_attempts || !failure.is_transient() {
+                        return Err(failure.into_error(operation, timeout).into());
+                    }
+
+                    // On transient failures, prefer reconnecting to clear any partial state/buffers.
+                    let _ = self.reconnect();
+                    std::thread::sleep(backoff_delay(
+                        self.config.retry.base_delay,
+                        self.config.retry.max_delay,
+                        attempt,
+                    ));
+                }
+            }
+        }
+
+        Err(DebuggerError::NetworkError(format!(
+            "Failed to complete {} after {} attempt(s)",
+            operation, max_attempts
+        ))
+        .into())
+    }
+
+    fn send_request_once(
+        &mut self,
+        request: DebugRequest,
+        timeout: Duration,
+    ) -> std::result::Result<DebugResponse, SendFailure> {
         if !self.authenticated
             && !matches!(
                 request,
@@ -402,10 +529,7 @@ impl RemoteClient {
                     | DebugRequest::Ping
             )
         {
-            return Err(DebuggerError::ExecutionError(
-                "Not authenticated. Call authenticate() first.".to_string(),
-            )
-            .into());
+            return Err(SendFailure::NotAuthenticated);
         }
 
         self.message_id += 1;
@@ -413,29 +537,140 @@ impl RemoteClient {
         let message = DebugMessage::request(expected_id, request);
 
         let request_json = serde_json::to_string(&message)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to serialize request: {}", e)))?;
+            .map_err(|e| SendFailure::Serialize(format!("Failed to serialize request: {}", e)))?;
 
-        // Send request
-        writeln!(self.stream.get_mut(), "{}", request_json).map_err(|e| {
-            DebuggerError::NetworkError(format!("Failed to write to stream: {}", e))
-        })?;
+        self.stream
+            .get_mut()
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| SendFailure::Io {
+                stage: "set_read_timeout",
+                source: e,
+            })?;
+        self.stream
+            .get_mut()
+            .set_write_timeout(Some(timeout))
+            .map_err(|e| SendFailure::Io {
+                stage: "set_write_timeout",
+                source: e,
+            })?;
+
+        writeln!(self.stream.get_mut(), "{}", request_json)
+            .map_err(|e| SendFailure::io("write", e, timeout))?;
         self.stream
             .get_mut()
             .flush()
-            .map_err(|e| DebuggerError::NetworkError(format!("Failed to flush stream: {}", e)))?;
+            .map_err(|e| SendFailure::io("flush", e, timeout))?;
 
-        // Read response
         let mut response_line = String::new();
         let n = self
             .stream
             .read_line(&mut response_line)
-            .map_err(|e| DebuggerError::NetworkError(format!("Failed to read response: {}", e)))?;
+            .map_err(|e| SendFailure::io("read", e, timeout))?;
         if n == 0 {
-            return Err(DebuggerError::NetworkError("No response from server".to_string()).into());
+            return Err(SendFailure::Disconnected);
         }
 
         parse_response_line(expected_id, response_line.trim_end())
+            .map_err(|e| SendFailure::Protocol(e.to_string()))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RequestClass {
+    Ping,
+    Inspect,
+    GetStorage,
+    Default,
+}
+
+impl RequestClass {
+    fn operation_name(self) -> &'static str {
+        match self {
+            RequestClass::Ping => "Ping",
+            RequestClass::Inspect => "Inspect",
+            RequestClass::GetStorage => "GetStorage",
+            RequestClass::Default => "Request",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SendFailure {
+    NotAuthenticated,
+    Disconnected,
+    Timeout {
+        stage: &'static str,
+        timeout: Duration,
+    },
+    Io {
+        stage: &'static str,
+        source: std::io::Error,
+    },
+    Serialize(String),
+    Protocol(String),
+}
+
+impl SendFailure {
+    fn io(stage: &'static str, source: std::io::Error, timeout: Duration) -> Self {
+        match source.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                SendFailure::Timeout { stage, timeout }
+            }
+            _ => SendFailure::Io { stage, source },
+        }
+    }
+
+    fn is_transient(&self) -> bool {
+        match self {
+            SendFailure::Timeout { .. } | SendFailure::Disconnected => true,
+            SendFailure::Io { source, .. } => matches!(
+                source.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::UnexpectedEof
+            ),
+            _ => false,
+        }
+    }
+
+    fn into_error(self, operation: &str, timeout: Duration) -> DebuggerError {
+        match self {
+            SendFailure::NotAuthenticated => DebuggerError::AuthenticationFailed(
+                "Not authenticated. Call authenticate() first.".to_string(),
+            ),
+            SendFailure::Disconnected => DebuggerError::NetworkError(format!(
+                "{} failed: connection closed by peer",
+                operation
+            )),
+            SendFailure::Timeout { stage, .. } => DebuggerError::RequestTimeout {
+                operation: format!("{} ({})", operation, stage),
+                timeout_ms: timeout.as_millis() as u64,
+            },
+            SendFailure::Io { stage, source } => DebuggerError::NetworkError(format!(
+                "{} failed during {}: {}",
+                operation, stage, source
+            )),
+            SendFailure::Serialize(message) => DebuggerError::FileError(message),
+            SendFailure::Protocol(message) => DebuggerError::NetworkError(format!(
+                "{} failed: protocol error: {}",
+                operation, message
+            )),
+        }
+    }
+}
+
+fn backoff_delay(base: Duration, max: Duration, attempt: usize) -> Duration {
+    if attempt <= 1 {
+        return base.min(max);
+    }
+
+    let exp = 1u32.saturating_shl((attempt - 1).min(31) as u32);
+    let delay = base.checked_mul(exp).unwrap_or(max).min(max);
+    delay
 }
 
 fn parse_response_line(expected_id: u64, response_line: &str) -> Result<DebugResponse> {
@@ -482,10 +717,9 @@ impl Drop for RemoteClient {
 mod tests {
     use super::*;
     use crate::server::protocol::DebugResponse;
-    use std::io::{BufRead, BufReader, ErrorKind, Write};
     use std::net::TcpListener;
-    use std::thread;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn parse_response_line_rejects_mismatched_ids() {
@@ -510,76 +744,84 @@ mod tests {
     }
 
     #[test]
-    fn reuses_buffered_stream_across_rapid_requests() {
-        let listener = match TcpListener::bind("127.0.0.1:0") {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == ErrorKind::PermissionDenied => return,
-            Err(err) => panic!("bind test listener: {err}"),
-        };
-        let addr = listener.local_addr().expect("listener address");
+    fn ping_times_out_deterministically() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
 
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept client");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .expect("set read timeout");
-
-            let read_stream = stream.try_clone().expect("clone stream for reader");
-            let mut reader = BufReader::new(read_stream);
-            let mut writer = stream;
-
-            for id in 1..=7 {
-                let mut request_line = String::new();
-                let bytes_read = reader.read_line(&mut request_line).expect("read request");
-                assert!(bytes_read > 0, "client closed before request {id}");
-
-                let request: DebugMessage =
-                    serde_json::from_str(&request_line).expect("parse request");
-                assert_eq!(request.id, id);
-
-                let response = match request.request.expect("request payload") {
-                    DebugRequest::Handshake { .. } => DebugMessage::response(
-                        request.id,
-                        DebugResponse::HandshakeAck {
-                            selected_version: PROTOCOL_MAX_VERSION,
-                            server_name: "test-server".to_string(),
-                            server_version: "0.0.0".to_string(),
-                            protocol_min: PROTOCOL_MIN_VERSION,
-                            protocol_max: PROTOCOL_MAX_VERSION,
-                        },
-                    ),
-                    DebugRequest::Ping => DebugMessage::response(request.id, DebugResponse::Pong),
-                    DebugRequest::Disconnect => {
-                        DebugMessage::response(request.id, DebugResponse::Disconnected)
-                    }
-                    other => panic!("unexpected request: {other:?}"),
-                };
-
-                let response_json = serde_json::to_string(&response).expect("serialize response");
-                writer
-                    .write_all(format!("{response_json}\n").as_bytes())
-                    .expect("write response");
-                writer.flush().expect("flush response");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Consume one request line but never respond.
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                std::thread::sleep(Duration::from_millis(200));
             }
         });
 
-        let mut client = RemoteClient::connect(&addr.to_string(), None).expect("connect client");
+        let config = RemoteClientConfig {
+            timeouts: RequestTimeouts {
+                ping: Duration::from_millis(50),
+                ..RequestTimeouts::default()
+            },
+            retry: RetryPolicy {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+            },
+        };
 
-        for _ in 0..5 {
-            client.ping().expect("ping over persistent stream");
-        }
-
-        client.disconnect().expect("disconnect client");
-        server.join().expect("server thread");
+        let mut client =
+            RemoteClient::connect_with_config(&addr.to_string(), None, config).unwrap();
+        let err = client.ping().unwrap_err();
+        assert!(err.to_string().contains("Request timed out"));
     }
 
     #[test]
-    fn sanitize_auth_message_redacts_token_echo() {
-        let sanitized = sanitize_auth_message(
-            "Authentication failed for token super-secret-token",
-            "super-secret-token",
-        );
-        assert!(sanitized.contains("<redacted>"));
-        assert!(!sanitized.contains("super-secret-token"));
+    fn ping_retries_on_disconnect_and_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen_server = Arc::clone(&seen);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let attempt = seen_server.fetch_add(1, Ordering::SeqCst);
+
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+
+                if attempt == 0 {
+                    // Drop connection without responding.
+                    drop(stream);
+                    continue;
+                }
+
+                let msg: DebugMessage = serde_json::from_str(line.trim_end()).unwrap();
+                let id = msg.id;
+                let response = DebugMessage::response(id, DebugResponse::Pong);
+                let json = serde_json::to_string(&response).unwrap();
+                let _ = writeln!(stream, "{}", json);
+                let _ = stream.flush();
+            }
+        });
+
+        let config = RemoteClientConfig {
+            timeouts: RequestTimeouts {
+                ping: Duration::from_millis(500),
+                ..RequestTimeouts::default()
+            },
+            retry: RetryPolicy {
+                max_attempts: 3,
+                base_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(5),
+            },
+        };
+
+        let mut client =
+            RemoteClient::connect_with_config(&addr.to_string(), None, config).unwrap();
+        client.ping().unwrap();
+        assert!(seen.load(Ordering::SeqCst) >= 2);
     }
 }

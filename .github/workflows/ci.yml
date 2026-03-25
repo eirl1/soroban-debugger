@@ -20,6 +20,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Docs guard (single canonical contributor guide)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f CONTRIBUTING.md
+
+          if [[ -f CONTRIBUTION.md ]]; then
+            lines="$(wc -l < CONTRIBUTION.md | tr -d ' ')"
+            if [[ "$lines" -gt 20 ]]; then
+              echo "CONTRIBUTION.md must remain a short redirect stub (<= 20 lines)."
+              exit 1
+            fi
+            grep -qi "deprecated" CONTRIBUTION.md
+            grep -q "CONTRIBUTING.md" CONTRIBUTION.md
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

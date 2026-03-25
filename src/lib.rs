@@ -94,4 +94,18 @@ pub enum DebuggerError {
         help("Check the server address, your internet/lan connection, firewall rules, and whether the remote debug server is running.")
     )]
     NetworkError(String),
+
+    #[error("Request timed out: {operation} (timeout={timeout_ms}ms)")]
+    #[diagnostic(
+        code(debugger::request_timeout),
+        help("This usually indicates network instability or a slow/overloaded remote host. Try increasing timeouts or reducing retries.")
+    )]
+    RequestTimeout { operation: String, timeout_ms: u64 },
+
+    #[error("Authentication failed: {0}")]
+    #[diagnostic(
+        code(debugger::auth_failed),
+        help("Verify the token matches on both the server and the client. If the server is using TLS, ensure you're connecting with the correct transport.")
+    )]
+    AuthenticationFailed(String),
 }

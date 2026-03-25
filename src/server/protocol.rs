@@ -73,6 +73,8 @@ pub fn negotiate_protocol_version(
     Ok(negotiated_max)
 }
 
+use crate::debugger::SourceBreakpointResolution;
+
 /// Structured event category used by dynamic security analysis.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum DynamicTraceEventKind {
@@ -193,8 +195,12 @@ pub enum DebugRequest {
     /// List all breakpoints
     ListBreakpoints,
 
-    /// Get backend debugging capabilities
-    GetCapabilities,
+    /// Resolve source breakpoints (file + line) into concrete exported function breakpoints.
+    ResolveSourceBreakpoints {
+        source_path: String,
+        lines: Vec<u32>,
+        exported_functions: Vec<String>,
+    },
 
     /// Set initial storage
     SetStorage { storage_json: String },
@@ -317,6 +323,11 @@ pub enum DebugResponse {
 
     /// Backend capabilities
     Capabilities { breakpoints: BreakpointCapabilities },
+
+    /// Resolved source breakpoints.
+    SourceBreakpointsResolved {
+        breakpoints: Vec<SourceBreakpointResolution>,
+    },
 
     /// Snapshot loaded
     SnapshotLoaded { summary: String },
