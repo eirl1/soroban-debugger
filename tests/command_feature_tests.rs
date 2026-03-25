@@ -379,6 +379,71 @@ expected_error = "unauthorized"
 }
 
 #[test]
+fn scenario_captures_step_output_and_uses_in_expected_return() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Increment"
+function = "increment"
+args = "[]"
+capture = "count"
+
+[[steps]]
+name = "Verify Get matches captured value"
+function = "get"
+expected_return = "{{count}}"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Captured return value as 'count'"))
+        .stdout(predicate::str::contains(
+            "All scenario steps passed successfully!",
+        ));
+}
+
+#[test]
+fn scenario_fails_on_undefined_variable_in_args() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Reference undefined variable"
+function = "increment"
+args = "[{{undefined_var}}]"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("undefined_var"));
+}
+
+#[test]
 fn repl_accepts_commands_and_exits() {
     let wasm = fixture_wasm("counter");
     let output = Command::new(env!("CARGO_BIN_EXE_soroban-debug"))

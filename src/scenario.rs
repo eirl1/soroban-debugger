@@ -6,6 +6,7 @@ use crate::logging;
 use crate::runtime::executor::ContractExecutor;
 use crate::ui::formatter::Formatter;
 use crate::{DebuggerError, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -28,6 +29,10 @@ pub struct ScenarioStep {
     pub expected_error: Option<String>,
     /// When set, the step is expected to panic with a message containing this substring.
     pub expected_panic: Option<String>,
+    /// When set, the return value of this step is stored in a variable with this name.
+    /// Later steps can reference the value using `{{var_name}}` in their `args` or
+    /// `expected_return` fields.
+    pub capture: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -89,6 +94,7 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
 
     let mut engine = DebuggerEngine::new(executor, vec![]);
     let mut all_passed = true;
+    let mut variables: HashMap<String, String> = HashMap::new();
 
     for (i, step) in scenario.steps.iter().enumerate() {
         let step_label = step.name.as_deref().unwrap_or(&step.function);
@@ -97,7 +103,20 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
             Formatter::info(format!("Step {}: {}", i + 1, step_label))
         );
 
-        let parsed_args = if let Some(args_json) = &step.args {
+        // Resolve variable references in args and expected_return before executing.
+        let resolved_args = if let Some(args_json) = &step.args {
+            Some(interpolate_variables(args_json, &variables)?)
+        } else {
+            None
+        };
+
+        let resolved_expected_return = if let Some(expected) = &step.expected_return {
+            Some(interpolate_variables(expected, &variables)?)
+        } else {
+            None
+        };
+
+        let parsed_args = if let Some(args_json) = &resolved_args {
             Some(crate::cli::commands::parse_args(args_json)?)
         } else {
             None
@@ -124,7 +143,21 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
                     step_passed = false;
                 } else {
                     println!("  Result: {}", res);
-                    if let Some(expected) = &step.expected_return {
+
+                    // Capture the return value into a named variable if requested.
+                    if let Some(var_name) = &step.capture {
+                        variables.insert(var_name.clone(), res.trim().to_string());
+                        println!(
+                            "  {}",
+                            Formatter::info(format!(
+                                "Captured return value as '{}' = '{}'",
+                                var_name,
+                                res.trim()
+                            ))
+                        );
+                    }
+
+                    if let Some(expected) = &resolved_expected_return {
                         if res.trim() == expected.trim() {
                             println!(
                                 "  {}",
@@ -288,6 +321,53 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
     }
 }
 
+/// Replaces `{{var_name}}` placeholders in `template` with values from `variables`.
+/// Returns an error with a descriptive message if any referenced variable is not defined.
+fn interpolate_variables(
+    template: &str,
+    variables: &HashMap<String, String>,
+) -> Result<String> {
+    let re = Regex::new(r"\{\{(\w+)\}\}").unwrap();
+
+    // Collect any missing variable names first for a clear error message.
+    let missing: Vec<String> = re
+        .captures_iter(template)
+        .filter_map(|caps| {
+            let var_name = caps[1].to_string();
+            if variables.contains_key(&var_name) {
+                None
+            } else {
+                Some(var_name)
+            }
+        })
+        .collect();
+
+    if !missing.is_empty() {
+        let available: Vec<&String> = variables.keys().collect();
+        let available_str = if available.is_empty() {
+            "(none)".to_string()
+        } else {
+            available
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(DebuggerError::ExecutionError(format!(
+            "Undefined variable(s) referenced in scenario step: [{}]. Available variables: [{}]",
+            missing.join(", "),
+            available_str
+        ))
+        .into());
+    }
+
+    let result = re.replace_all(template, |caps: &regex::Captures| {
+        variables[&caps[1]].clone()
+    });
+
+    Ok(result.into_owned())
+}
+
 fn assert_expected_events(
     expected_events: &[ScenarioEventAssertion],
     actual_events: &[ContractEvent],
@@ -364,6 +444,69 @@ fn assert_budget_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_interpolate_variables_replaces_known_placeholders() {
+        let mut vars = HashMap::new();
+        vars.insert("count".to_string(), "I64(1)".to_string());
+        vars.insert("name".to_string(), "Alice".to_string());
+
+        let result = interpolate_variables("[{{count}}, \"{{name}}\"]", &vars).unwrap();
+        assert_eq!(result, "[I64(1), \"Alice\"]");
+    }
+
+    #[test]
+    fn test_interpolate_variables_no_placeholders_is_identity() {
+        let vars: HashMap<String, String> = HashMap::new();
+        let result = interpolate_variables("[1, 2, 3]", &vars).unwrap();
+        assert_eq!(result, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_interpolate_variables_errors_on_undefined_variable() {
+        let mut vars = HashMap::new();
+        vars.insert("defined".to_string(), "42".to_string());
+
+        let err = interpolate_variables("{{defined}} and {{missing}}", &vars).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing"), "error should name the missing variable: {}", msg);
+        assert!(
+            msg.contains("defined"),
+            "error should list available variables: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_interpolate_variables_errors_on_undefined_with_no_available_vars() {
+        let vars: HashMap<String, String> = HashMap::new();
+        let err = interpolate_variables("{{unknown}}", &vars).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown"), "error should name the missing variable: {}", msg);
+        assert!(msg.contains("(none)"), "error should say no vars are available: {}", msg);
+    }
+
+    #[test]
+    fn test_capture_field_deserialization() {
+        let toml_str = r#"
+            [[steps]]
+            function = "increment"
+            args = "[]"
+            capture = "my_result"
+
+            [[steps]]
+            function = "get"
+            expected_return = "{{my_result}}"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps[0].capture.as_deref(), Some("my_result"));
+        assert!(scenario.steps[1].capture.is_none());
+        assert_eq!(
+            scenario.steps[1].expected_return.as_deref(),
+            Some("{{my_result}}")
+        );
+    }
 
     #[test]
     fn test_scenario_deserialization() {

@@ -215,6 +215,63 @@ The batch args file should contain a JSON array of test cases:
 
 See [docs/batch-execution.md](https://github.com/Timi16/soroban-debugger/blob/main/docs/batch-execution.md) for detailed documentation.
 
+### Scenario Command
+
+Run a multi-step test scenario defined in a TOML file:
+
+```bash
+soroban-debug scenario --scenario my_scenario.toml --contract my_contract.wasm
+```
+
+Each step can specify a function to call, its arguments, and assertions on the return value,
+contract storage, emitted events, and CPU/memory budget.
+
+#### Capturing Step Outputs into Variables
+
+A step can save its return value into a named variable using the `capture` field. Later steps
+can reference that variable using the `{{var_name}}` syntax in their `args` or `expected_return`
+fields. This lets multi-step scenarios remain free of hard-coded intermediate values.
+
+```toml
+[[steps]]
+name = "Mint tokens"
+function = "mint"
+args = '["Alice", 1000]'
+# Store the return value (e.g. the new total supply) in a variable.
+capture = "supply"
+
+[[steps]]
+name = "Check total supply"
+function = "total_supply"
+# Assert the next call returns whatever was captured above.
+expected_return = "{{supply}}"
+
+[[steps]]
+name = "Transfer using captured supply"
+function = "transfer"
+# Interpolate the captured value into the args JSON.
+args = '["Alice", "Bob", {{supply}}]'
+```
+
+If a step references a variable that has not been captured yet, the scenario fails immediately
+with a descriptive error listing the undefined variable name and the variables that are
+currently available.
+
+#### Scenario Step Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Optional human-readable label for the step |
+| `function` | string | Contract function to call |
+| `args` | string (JSON) | Function arguments as a JSON array. Supports `{{var}}` interpolation. |
+| `capture` | string | Variable name to store the return value in for use by later steps |
+| `expected_return` | string | Assert the return value equals this. Supports `{{var}}` interpolation. |
+| `expected_error` | string | Assert the step fails with an error message containing this substring |
+| `expected_panic` | string | Assert the step panics with a message containing this substring |
+| `expected_events` | array | Assert the step emits exactly these contract events |
+| `expected_storage` | table | Assert specific storage keys have these values after the step |
+| `budget_limits` | table | Assert CPU/memory usage stays within `max_cpu_instructions`/`max_memory_bytes` |
+
 ### Storage Filtering
 
 Filter large storage outputs by key pattern using `--storage-filter`:
