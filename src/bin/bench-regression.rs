@@ -118,4 +118,3 @@ fn run(cli: Cli) -> soroban_debugger::Result<()> {
 
     Ok(())
 }
-

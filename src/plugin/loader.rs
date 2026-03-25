@@ -409,12 +409,31 @@ fn resolve_platform_library_path(manifest_dir: &Path, library: &str) -> Option<P
     None
 }
 
+
 impl Drop for LoadedPlugin {
     fn drop(&mut self) {
         info!("Unloading plugin: {}", self.manifest.name);
 
         if let Err(e) = self.plugin.shutdown() {
             error!("Error shutting down plugin {}: {}", self.manifest.name, e);
+        }
+    }
+}
+
+#[cfg(test)]
+impl LoadedPlugin {
+    pub(crate) fn from_parts_for_tests(
+        plugin: Box<dyn InspectorPlugin>,
+        path: PathBuf,
+        manifest: PluginManifest,
+        trust: PluginTrustAssessment,
+    ) -> Self {
+        Self {
+            plugin,
+            library: None,
+            path,
+            manifest,
+            trust,
         }
     }
 }
@@ -614,20 +633,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-impl LoadedPlugin {
-    pub(crate) fn from_parts_for_tests(
-        plugin: Box<dyn InspectorPlugin>,
-        path: PathBuf,
-        manifest: PluginManifest,
-        trust: PluginTrustAssessment,
-    ) -> Self {
-        Self {
-            plugin,
-            library: None,
-            path,
-            manifest,
-            trust,
-        }
-    }
-}

@@ -1,6 +1,7 @@
 use super::api::{OutputFormatter, PluginCommand, PluginError, PluginResult};
 use super::events::{
-    EventContext, ExecutionEvent, PluginInvocationKind, PluginInvocationOutcome, PluginTelemetryEvent,
+    EventContext, ExecutionEvent, PluginInvocationKind, PluginInvocationOutcome,
+    PluginTelemetryEvent,
 };
 use super::loader::{LoadedPlugin, PluginLoader, PluginTrustPolicy};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -268,6 +269,13 @@ struct PluginHealth {
     last_error: Option<String>,
 }
 
+struct InvocationMetadata<'a> {
+    name: &'a str,
+    kind: PluginInvocationKind,
+    timeout: Duration,
+    elapsed: Duration,
+}
+
 impl PluginRegistry {
     /// Create a new plugin registry with the default plugin directory
     pub fn new() -> PluginResult<Self> {
@@ -413,7 +421,9 @@ impl PluginRegistry {
             .insert(name.clone(), Arc::new(RwLock::new(plugin)));
         self.health
             .write()
-            .map_err(|_| PluginError::ExecutionFailed("Failed to update plugin health".to_string()))?
+            .map_err(|_| {
+                PluginError::ExecutionFailed("Failed to update plugin health".to_string())
+            })?
             .insert(name, PluginHealth::default());
         Ok(())
     }
@@ -439,7 +449,9 @@ impl PluginRegistry {
 
         let names: Vec<String> = self.plugins.keys().cloned().collect();
         for name in names {
-            let Some(plugin_arc) = self.plugins.get(&name) else { continue };
+            let Some(plugin_arc) = self.plugins.get(&name) else {
+                continue;
+            };
             let mut health = match self.health.write() {
                 Ok(health) => health,
                 Err(_) => {
@@ -600,7 +612,9 @@ impl PluginRegistry {
     pub fn execute_command(&self, command: &str, args: &[String]) -> PluginResult<Option<String>> {
         let names: Vec<String> = self.plugins.keys().cloned().collect();
         for name in names {
-            let Some(plugin_arc) = self.plugins.get(&name) else { continue };
+            let Some(plugin_arc) = self.plugins.get(&name) else {
+                continue;
+            };
             {
                 let plugin = plugin_arc.read().map_err(|_| {
                     PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
@@ -608,7 +622,12 @@ impl PluginRegistry {
                 if !plugin.manifest().capabilities.provides_commands {
                     continue;
                 }
-                if !plugin.plugin().commands().iter().any(|cmd| cmd.name == command) {
+                if !plugin
+                    .plugin()
+                    .commands()
+                    .iter()
+                    .any(|cmd| cmd.name == command)
+                {
                     continue;
                 }
             }
@@ -616,7 +635,8 @@ impl PluginRegistry {
             let mut health = self.health.write().map_err(|_| {
                 PluginError::ExecutionFailed("Failed to update plugin health".to_string())
             })?;
-            let result = self.run_command_with_policy(&mut health, &name, plugin_arc, command, args)?;
+            let result =
+                self.run_command_with_policy(&mut health, &name, plugin_arc, command, args)?;
             return Ok(Some(result));
         }
 
@@ -626,7 +646,9 @@ impl PluginRegistry {
     pub fn format_output(&self, formatter: &str, data: &str) -> PluginResult<Option<String>> {
         let names: Vec<String> = self.plugins.keys().cloned().collect();
         for name in names {
-            let Some(plugin_arc) = self.plugins.get(&name) else { continue };
+            let Some(plugin_arc) = self.plugins.get(&name) else {
+                continue;
+            };
             {
                 let plugin = plugin_arc.read().map_err(|_| {
                     PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
@@ -634,7 +656,12 @@ impl PluginRegistry {
                 if !plugin.manifest().capabilities.provides_formatters {
                     continue;
                 }
-                if !plugin.plugin().formatters().iter().any(|fmt| fmt.name == formatter) {
+                if !plugin
+                    .plugin()
+                    .formatters()
+                    .iter()
+                    .any(|fmt| fmt.name == formatter)
+                {
                     continue;
                 }
             }
@@ -675,16 +702,22 @@ impl PluginRegistry {
             let mut plugin = plugin_arc.write().map_err(|_| {
                 PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
             })?;
-            catch_unwind(AssertUnwindSafe(|| plugin.plugin_mut().on_event(event, context)))
+            catch_unwind(AssertUnwindSafe(|| {
+                plugin.plugin_mut().on_event(event, context)
+            }))
         };
         self.record_outcome(
             health,
             Some(context),
-            name,
-            PluginInvocationKind::Hook,
-            self.policy.hook_timeout,
-            start.elapsed(),
-            result.map_err(|_| PluginError::ExecutionFailed("Plugin panicked during hook execution".to_string())),
+            InvocationMetadata {
+                name,
+                kind: PluginInvocationKind::Hook,
+                timeout: self.policy.hook_timeout,
+                elapsed: start.elapsed(),
+            },
+            result.map_err(|_| {
+                PluginError::ExecutionFailed("Plugin panicked during hook execution".to_string())
+            }),
         )
     }
 
@@ -708,16 +741,22 @@ impl PluginRegistry {
             let mut plugin = plugin_arc.write().map_err(|_| {
                 PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
             })?;
-            catch_unwind(AssertUnwindSafe(|| plugin.plugin_mut().execute_command(command, args)))
+            catch_unwind(AssertUnwindSafe(|| {
+                plugin.plugin_mut().execute_command(command, args)
+            }))
         };
         self.record_outcome(
             health,
             None,
-            name,
-            PluginInvocationKind::Command,
-            self.policy.command_timeout,
-            start.elapsed(),
-            result.map_err(|_| PluginError::ExecutionFailed("Plugin panicked during command execution".to_string())),
+            InvocationMetadata {
+                name,
+                kind: PluginInvocationKind::Command,
+                timeout: self.policy.command_timeout,
+                elapsed: start.elapsed(),
+            },
+            result.map_err(|_| {
+                PluginError::ExecutionFailed("Plugin panicked during command execution".to_string())
+            }),
         )
     }
 
@@ -741,30 +780,35 @@ impl PluginRegistry {
             let plugin = plugin_arc.write().map_err(|_| {
                 PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
             })?;
-            catch_unwind(AssertUnwindSafe(|| plugin.plugin().format_output(formatter, data)))
+            catch_unwind(AssertUnwindSafe(|| {
+                plugin.plugin().format_output(formatter, data)
+            }))
         };
         self.record_outcome(
             health,
             None,
-            name,
-            PluginInvocationKind::Formatter,
-            self.policy.formatter_timeout,
-            start.elapsed(),
-            result.map_err(|_| PluginError::ExecutionFailed("Plugin panicked during formatter execution".to_string())),
+            InvocationMetadata {
+                name,
+                kind: PluginInvocationKind::Formatter,
+                timeout: self.policy.formatter_timeout,
+                elapsed: start.elapsed(),
+            },
+            result.map_err(|_| {
+                PluginError::ExecutionFailed(
+                    "Plugin panicked during formatter execution".to_string(),
+                )
+            }),
         )
     }
 
     fn record_outcome<T>(
         &self,
         health: &mut HashMap<String, PluginHealth>,
-        mut context: Option<&mut EventContext>,
-        name: &str,
-        kind: PluginInvocationKind,
-        timeout: Duration,
-        elapsed: Duration,
+        context: Option<&mut EventContext>,
+        meta: InvocationMetadata,
         result: Result<PluginResult<T>, PluginError>,
     ) -> PluginResult<T> {
-        let state = health.entry(name.to_string()).or_default();
+        let state = health.entry(meta.name.to_string()).or_default();
 
         match result {
             Err(err) => {
@@ -775,13 +819,13 @@ impl PluginRegistry {
                 if state.consecutive_failures >= self.policy.max_consecutive_failures {
                     state.circuit_open = true;
                 }
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context {
                     Self::push_telemetry(
                         ctx,
-                        name,
-                        kind,
+                        meta.name,
+                        meta.kind,
                         PluginInvocationOutcome::Panic,
-                        elapsed.as_millis(),
+                        meta.elapsed.as_millis(),
                         err.to_string(),
                     );
                 }
@@ -794,26 +838,26 @@ impl PluginRegistry {
                 if state.consecutive_failures >= self.policy.max_consecutive_failures {
                     state.circuit_open = true;
                 }
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context {
                     Self::push_telemetry(
                         ctx,
-                        name,
-                        kind,
+                        meta.name,
+                        meta.kind,
                         PluginInvocationOutcome::Failure,
-                        elapsed.as_millis(),
+                        meta.elapsed.as_millis(),
                         err.to_string(),
                     );
                 }
                 Err(err)
             }
-            Ok(Ok(value)) if elapsed > timeout => {
+            Ok(Ok(value)) if meta.elapsed > meta.timeout => {
                 state.total_timeouts += 1;
                 state.total_failures += 1;
                 state.timeout_count += 1;
                 state.consecutive_failures += 1;
                 let message = format!(
                     "Plugin '{}' exceeded the {:?} {:?} budget ({:?})",
-                    name, kind, timeout, elapsed
+                    meta.name, meta.kind, meta.timeout, meta.elapsed
                 );
                 state.last_error = Some(message.clone());
                 if state.timeout_count >= self.policy.max_timeouts
@@ -821,13 +865,13 @@ impl PluginRegistry {
                 {
                     state.circuit_open = true;
                 }
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context {
                     Self::push_telemetry(
                         ctx,
-                        name,
-                        kind,
+                        meta.name,
+                        meta.kind,
                         PluginInvocationOutcome::Timeout,
-                        elapsed.as_millis(),
+                        meta.elapsed.as_millis(),
                         message.clone(),
                     );
                 }
@@ -838,13 +882,13 @@ impl PluginRegistry {
                 state.timeout_count = 0;
                 state.circuit_open = false;
                 state.last_error = None;
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context {
                     Self::push_telemetry(
                         ctx,
-                        name,
-                        kind,
+                        meta.name,
+                        meta.kind,
                         PluginInvocationOutcome::Success,
-                        elapsed.as_millis(),
+                        meta.elapsed.as_millis(),
                         "Plugin invocation completed successfully.".to_string(),
                     );
                 }
@@ -871,7 +915,10 @@ impl PluginRegistry {
     }
 
     fn circuit_open(health: &HashMap<String, PluginHealth>, name: &str) -> bool {
-        health.get(name).map(|state| state.circuit_open).unwrap_or(false)
+        health
+            .get(name)
+            .map(|state| state.circuit_open)
+            .unwrap_or(false)
     }
 }
 
@@ -925,6 +972,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    #[allow(dead_code)]
     #[derive(Clone)]
     enum Behavior {
         Success,
@@ -965,7 +1013,11 @@ mod tests {
         }
 
         fn next_behavior(queue: &Arc<Mutex<VecDeque<Behavior>>>) -> Behavior {
-            queue.lock().unwrap().pop_front().unwrap_or(Behavior::Success)
+            queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Behavior::Success)
         }
     }
 
@@ -974,7 +1026,11 @@ mod tests {
             self.manifest.clone()
         }
 
-        fn on_event(&mut self, _event: &ExecutionEvent, _context: &mut EventContext) -> PluginResult<()> {
+        fn on_event(
+            &mut self,
+            _event: &ExecutionEvent,
+            _context: &mut EventContext,
+        ) -> PluginResult<()> {
             match Self::next_behavior(&self.hook_behavior) {
                 Behavior::Success => Ok(()),
                 Behavior::Fail => Err(PluginError::ExecutionFailed("hook failed".to_string())),
@@ -1221,7 +1277,12 @@ mod tests {
     fn hook_failures_are_contained_and_open_circuit_after_budget() {
         let plugin = TestPlugin::new(
             "failing",
-            vec![Behavior::Fail, Behavior::Fail, Behavior::Fail, Behavior::Success],
+            vec![
+                Behavior::Fail,
+                Behavior::Fail,
+                Behavior::Fail,
+                Behavior::Success,
+            ],
             vec![],
         );
         let registry = registry_with_plugin_and_policy(
@@ -1242,10 +1303,9 @@ mod tests {
         let stats = registry.statistics();
         assert_eq!(stats.plugin_failures, 3);
         assert_eq!(stats.open_circuits, 1);
-        assert!(context.plugin_telemetry.iter().any(|entry|
-            entry.outcome == PluginInvocationOutcome::SkippedCircuitOpen
-                && entry.kind == PluginInvocationKind::Hook
-        ));
+        assert!(context.plugin_telemetry.iter().any(|entry| entry.outcome
+            == PluginInvocationOutcome::SkippedCircuitOpen
+            && entry.kind == PluginInvocationKind::Hook));
     }
 
     #[test]
@@ -1277,9 +1337,10 @@ mod tests {
         let stats = registry.statistics();
         assert_eq!(stats.plugin_timeouts, 2);
         assert_eq!(stats.open_circuits, 1);
-        assert!(context.plugin_telemetry.iter().any(|entry|
-            entry.outcome == PluginInvocationOutcome::Timeout
-        ));
+        assert!(context
+            .plugin_telemetry
+            .iter()
+            .any(|entry| entry.outcome == PluginInvocationOutcome::Timeout));
     }
 
     #[test]
@@ -1287,7 +1348,12 @@ mod tests {
         let plugin = TestPlugin::new(
             "commandy",
             vec![],
-            vec![Behavior::Fail, Behavior::Fail, Behavior::Fail, Behavior::Success],
+            vec![
+                Behavior::Fail,
+                Behavior::Fail,
+                Behavior::Fail,
+                Behavior::Success,
+            ],
         );
         let registry = registry_with_plugin_and_policy(
             plugin,
@@ -1308,7 +1374,12 @@ mod tests {
     fn successful_hook_resets_failure_streak() {
         let plugin = TestPlugin::new(
             "recovering",
-            vec![Behavior::Fail, Behavior::Success, Behavior::Fail, Behavior::Success],
+            vec![
+                Behavior::Fail,
+                Behavior::Success,
+                Behavior::Fail,
+                Behavior::Success,
+            ],
             vec![],
         );
         let registry = registry_with_plugin_and_policy(

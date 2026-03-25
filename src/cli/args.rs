@@ -108,15 +108,15 @@ pub struct Cli {
     pub trend_function: Option<String>,
 
     /// Regression threshold percentage for `--budget-trend` warnings
-    #[arg(long, default_value_t = 10.0, value_name = "PCT", value_parser = clap::value_parser!(f64).range(0.0..))]
+    #[arg(long, default_value_t = 10.0, value_name = "PCT", value_parser = clap::value_parser!(f64))]
     pub trend_regression_threshold_pct: f64,
 
     /// Lookback window (number of runs) for `--budget-trend` regression detection
-    #[arg(long, default_value_t = 2, value_name = "N", value_parser = clap::value_parser!(usize).range(2..))]
+    #[arg(long, default_value_t = 2, value_name = "N", value_parser = clap::value_parser!(usize))]
     pub trend_regression_lookback: usize,
 
     /// Smoothing window (moving average) for `--budget-trend` regression detection (1 disables smoothing)
-    #[arg(long, default_value_t = 1, value_name = "N", value_parser = clap::value_parser!(usize).range(1..))]
+    #[arg(long, default_value_t = 1, value_name = "N", value_parser = clap::value_parser!(usize))]
     pub trend_regression_smoothing: usize,
 
     #[command(subcommand)]
@@ -859,7 +859,7 @@ pub struct ProfileArgs {
     pub flamegraph_height: usize,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct SymbolicArgs {
     /// Path to the contract WASM file
     #[arg(short, long)]
@@ -888,6 +888,14 @@ pub struct SymbolicArgs {
     /// Overall symbolic analysis timeout in seconds
     #[arg(long, value_name = "SECONDS")]
     pub timeout: Option<u64>,
+
+    /// Maximum breadth of seeds per primitive type
+    #[arg(long, value_name = "N")]
+    pub max_breadth: Option<usize>,
+
+    /// Maximum recursion depth for nested types
+    #[arg(long, value_name = "N")]
+    pub max_depth: Option<usize>,
 }
 
 #[derive(Parser)]

@@ -369,8 +369,45 @@ expected_return = "800"
 - Use storage assertions to understand contract state
 - Verify function names and argument types match the contract
 
+## Symbolic Analysis
+
+The symbolic analyzer helps you identify edge cases and improve branch coverage by automatically generating valid, type-aware inputs for your contract functions.
+
+### Key Benefits
+
+- **Type-Aware Generation**: Automatically generates valid seeds for `Address`, `Option`, `Vec`, `Map`, `Tuple`, and primitive types.
+- **Coverage Exploration**: Systematically explores function branches to find panics or unexpected behavior.
+- **Deterministic**: Produces reproducible test scenarios.
+
+### Command Usage
+
+```bash
+soroban-debugger symbolic --contract <WASM_FILE> --function <FUNCTION_NAME> [OPTIONS]
+```
+
+### Strategy Knobs
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--max-breadth` | 5 | Maximum number of seeds per primitive type |
+| `--max-depth` | 3 | Maximum recursion depth for nested types |
+| `--input-combination-cap` | 100 | Maximum number of input combinations to generate |
+| `--path-cap` | 100 | Maximum number of generated inputs to execute |
+| `--profile` | `balanced` | Preset budget (fast, balanced, deep) |
+
+### Example
+
+Generate up to 50 test cases for a `transfer` function with complex nested types:
+
+```bash
+soroban-debugger symbolic \
+  --contract token.wasm \
+  --function transfer \
+  --max-breadth 10 \
+  --max-depth 4 \
+  --input-combination-cap 50
+```
+
 ## Conclusion
 
-The scenario runner provides a powerful way to test Soroban contracts without writing Rust test code. By using the TOML format, you can quickly create comprehensive integration tests that validate both function behavior and contract state.
-
-The combination of return value assertions and storage validation makes it ideal for testing complex contract workflows and ensuring contract correctness across multiple operations.
+The combination of the scenario runner and symbolic analyzer provides a comprehensive toolkit for testing and hardening Soroban contracts. Use the symbolic analyzer to discover edge cases, and then capture those as permanent integration tests in TOML scenarios.

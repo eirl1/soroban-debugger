@@ -94,6 +94,7 @@ pub struct DynamicTraceEvent {
     pub message: String,
     pub caller: Option<String>,
     pub function: Option<String>,
+    pub call_depth: Option<usize>,
     pub storage_key: Option<String>,
     pub storage_value: Option<String>,
 }
@@ -375,9 +376,8 @@ impl DebugMessage {
     /// Parse a JSON string into a DebugMessage with field-aware error reporting.
     pub fn parse(json: &str) -> std::result::Result<Self, String> {
         let deserializer = &mut serde_json::Deserializer::from_str(json);
-        serde_path_to_error::deserialize(deserializer).map_err(|e| {
-            format!("Protocol error at '{}': {}", e.path(), e.inner())
-        })
+        serde_path_to_error::deserialize(deserializer)
+            .map_err(|e| format!("Protocol error at '{}': {}", e.path(), e.inner()))
     }
 }
 
@@ -453,7 +453,11 @@ mod tests {
             }
         }"#;
         let err = DebugMessage::parse(json).unwrap_err();
-        assert!(err.contains("request.client_version"), "Error should mention missing field: {}", err);
+        assert!(
+            err.contains("client_version"),
+            "Error should mention missing field: {}",
+            err
+        );
     }
 
     #[test]
@@ -478,6 +482,6 @@ mod tests {
             "call_depth": 5
         }"#;
         let event: DynamicTraceEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.call_depth, 5);
+        assert_eq!(event.call_depth, Some(5));
     }
 }

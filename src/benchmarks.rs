@@ -17,7 +17,7 @@ pub enum RegressionStatus {
     Fail,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ComparisonConfig {
     pub warn_pct: f64,
     pub fail_pct: f64,
@@ -47,11 +47,7 @@ pub fn load_baseline_json(path: impl AsRef<Path>) -> Result<CriterionBaseline> {
         DebuggerError::FileError(format!("Failed to read baseline JSON {:?}: {e}", path))
     })?;
     serde_json::from_slice(&bytes).map_err(|e| {
-        DebuggerError::FileError(format!(
-            "Failed to parse baseline JSON {:?}: {e}",
-            path
-        ))
-        .into()
+        DebuggerError::FileError(format!("Failed to parse baseline JSON {:?}: {e}", path)).into()
     })
 }
 
@@ -94,10 +90,11 @@ fn collect_estimates_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let dir = match fs::read_dir(root) {
         Ok(dir) => dir,
         Err(e) => {
-            return Err(
-                DebuggerError::FileError(format!("Failed to read directory {:?}: {e}", root))
-                    .into(),
-            )
+            return Err(DebuggerError::FileError(format!(
+                "Failed to read directory {:?}: {e}",
+                root
+            ))
+            .into())
         }
     };
 
@@ -106,31 +103,39 @@ fn collect_estimates_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             DebuggerError::FileError(format!("Failed to read directory entry in {:?}: {e}", root))
         })?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|e| {
-            DebuggerError::FileError(format!("Failed to stat {:?}: {e}", path))
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| DebuggerError::FileError(format!("Failed to stat {:?}: {e}", path)))?;
 
         if file_type.is_dir() {
             collect_estimates_files(&path, out)?;
             continue;
         }
 
-        if file_type.is_file() {
-            if path.file_name().and_then(|s| s.to_str()) == Some("estimates.json")
-                && path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str())
-                    == Some("new")
-            {
-                out.push(path);
-            }
+        if file_type.is_file()
+            && path.file_name().and_then(|s| s.to_str()) == Some("estimates.json")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                == Some("new")
+        {
+            out.push(path);
         }
     }
 
     Ok(())
 }
 
-fn parse_estimates_mean_ns(criterion_dir: &Path, estimates_path: &Path) -> Result<Option<(String, f64)>> {
+fn parse_estimates_mean_ns(
+    criterion_dir: &Path,
+    estimates_path: &Path,
+) -> Result<Option<(String, f64)>> {
     let bytes = fs::read(estimates_path).map_err(|e| {
-        DebuggerError::FileError(format!("Failed to read estimates file {:?}: {e}", estimates_path))
+        DebuggerError::FileError(format!(
+            "Failed to read estimates file {:?}: {e}",
+            estimates_path
+        ))
     })?;
 
     let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
@@ -210,7 +215,11 @@ pub fn compare_baselines(
     }
 
     // Largest regressions first, then improvements.
-    deltas.sort_by(|a, b| b.delta_pct.partial_cmp(&a.delta_pct).unwrap_or(std::cmp::Ordering::Equal));
+    deltas.sort_by(|a, b| {
+        b.delta_pct
+            .partial_cmp(&a.delta_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     deltas
 }
 
@@ -255,7 +264,11 @@ pub fn render_markdown_report(
     }
 
     if deltas.len() > max_rows.max(1) {
-        out.push_str(&format!("\nShowing top {} of {} benchmarks.\n", max_rows, deltas.len()));
+        out.push_str(&format!(
+            "\nShowing top {} of {} benchmarks.\n",
+            max_rows,
+            deltas.len()
+        ));
     }
 
     out
@@ -345,4 +358,3 @@ mod tests {
         assert_eq!(overall_status(&deltas2), RegressionStatus::Fail);
     }
 }
-

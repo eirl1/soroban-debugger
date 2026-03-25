@@ -116,8 +116,8 @@ impl DebugServer {
                 Err(e) => {
                     warn!("Failed to parse request: {}", e);
                     let response = DebugMessage::response(
-                        0, // ID might be unknown if parse failed, but often it's available. 
-                           // For now use 0 or try to extract it if possible.
+                        0, // ID might be unknown if parse failed, but often it's available.
+                        // For now use 0 or try to extract it if possible.
                         DebugResponse::Error {
                             message: format!("Malformed request: {}", e),
                         },
@@ -770,6 +770,9 @@ impl DebugServer {
                 },
                 DebugRequest::Ping => DebugResponse::Pong,
                 DebugRequest::Disconnect => DebugResponse::Disconnected,
+                DebugRequest::Unknown => DebugResponse::Error {
+                    message: "Unknown request type".to_string(),
+                },
             };
 
             let response = DebugMessage::response(message.id, response);

@@ -150,6 +150,12 @@ fn symbolic_config_from_args(args: &SymbolicArgs) -> SymbolicConfig {
     if let Some(timeout) = args.timeout {
         config.timeout_secs = timeout;
     }
+    if let Some(breadth) = args.max_breadth {
+        config.max_breadth = breadth;
+    }
+    if let Some(depth) = args.max_depth {
+        config.max_depth = depth;
+    }
     config
 }
 
@@ -2115,7 +2121,10 @@ pub fn show_budget_trend(
             "Regression params: threshold>{:.1}% lookback={} smoothing={}",
             regression.threshold_pct, regression.lookback, regression.smoothing_window
         );
-        println!("Runs: {}   Range: {} -> {}", stats.count, stats.first_date, stats.last_date);
+        println!(
+            "Runs: {}   Range: {} -> {}",
+            stats.count, stats.first_date, stats.last_date
+        );
         println!(
             "CPU insns: last={}  avg={}  min={}  max={}",
             crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.last_cpu),

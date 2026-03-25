@@ -1,4 +1,5 @@
 use crate::runtime::executor::ContractExecutor;
+use crate::utils::wasm::{parse_function_signatures, ContractFunctionSignature};
 use crate::{DebuggerError, Result};
 use serde::Serialize;
 use std::cmp;
@@ -23,11 +24,13 @@ pub struct SymbolicReport {
     pub metadata: SymbolicReportMetadata,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SymbolicConfig {
     pub max_paths: usize,
     pub max_input_combinations: usize,
     pub timeout_secs: u64,
+    pub max_breadth: usize,
+    pub max_depth: usize,
 }
 
 impl Default for SymbolicConfig {
@@ -37,20 +40,27 @@ impl Default for SymbolicConfig {
 }
 
 impl SymbolicConfig {
-    pub const fn fast() -> Self {
-        Self {
-            max_paths: 25,
-            max_input_combinations: 64,
-            timeout_secs: 5,
-        }
-    }
-
     pub const fn balanced() -> Self {
         Self {
             max_paths: 100,
             max_input_combinations: 256,
             timeout_secs: 30,
+            max_breadth: 5,
+            max_depth: 3,
         }
+    }
+    pub const fn fast() -> Self {
+        Self {
+            max_paths: 25,
+            max_input_combinations: 64,
+            timeout_secs: 5,
+            max_breadth: 3,
+            max_depth: 2,
+        }
+    }
+
+    pub fn default_balanced() -> Self {
+        Self::default()
     }
 
     pub const fn deep() -> Self {
@@ -58,6 +68,8 @@ impl SymbolicConfig {
             max_paths: 500,
             max_input_combinations: 2048,
             timeout_secs: 120,
+            max_breadth: 8,
+            max_depth: 5,
         }
     }
 }
@@ -127,9 +139,15 @@ impl SymbolicAnalyzer {
         function: &str,
         config: &SymbolicConfig,
     ) -> Result<SymbolicReport> {
-        let arg_count = self.get_arg_count(wasm, function).unwrap_or(0);
-        let generated_inputs =
-            self.generate_input_combinations(arg_count, config.max_input_combinations);
+        let signatures = parse_function_signatures(wasm).unwrap_or_default();
+        let target_sig = signatures.into_iter().find(|s| s.name == function);
+
+        let generated_inputs = if let Some(sig) = target_sig {
+            self.generate_type_aware_inputs(&sig, config)
+        } else {
+            let arg_count = self.get_arg_count(wasm, function).unwrap_or(0);
+            self.generate_input_combinations(arg_count, config.max_input_combinations)
+        };
         let deadline = Instant::now();
 
         let mut report = SymbolicReport {
@@ -305,9 +323,155 @@ impl SymbolicAnalyzer {
         )
     }
 
+    fn generate_type_aware_inputs(
+        &self,
+        sig: &ContractFunctionSignature,
+        config: &SymbolicConfig,
+    ) -> GeneratedInputs {
+        let mut parameter_seeds = Vec::new();
+
+        for param in &sig.params {
+            let seeds = self.generate_seeds_for_type(&param.type_name, config, 0);
+            parameter_seeds.push(seeds);
+        }
+
+        if parameter_seeds.is_empty() {
+            return GeneratedInputs {
+                combinations: vec!["[]".to_string()],
+                truncated_by_input_cap: false,
+            };
+        }
+
+        let mut combinations = Vec::new();
+        let mut indices = vec![0; parameter_seeds.len()];
+        let mut truncated = false;
+
+        loop {
+            let mut args = Vec::new();
+            for (i, p_idx) in indices.iter().enumerate() {
+                args.push(parameter_seeds[i][*p_idx].clone());
+            }
+            combinations.push(format!("[{}]", args.join(", ")));
+
+            if combinations.len() >= config.max_input_combinations {
+                truncated = true;
+                break;
+            }
+
+            let mut carry = true;
+            for i in (0..indices.len()).rev() {
+                if indices[i] + 1 < parameter_seeds[i].len() {
+                    indices[i] += 1;
+                    for item in indices.iter_mut().skip(i + 1) {
+                        *item = 0;
+                    }
+                    carry = false;
+                    break;
+                }
+            }
+
+            if carry {
+                break;
+            }
+        }
+
+        GeneratedInputs {
+            combinations,
+            truncated_by_input_cap: truncated,
+        }
+    }
+
+    fn generate_seeds_for_type(
+        &self,
+        type_name: &str,
+        config: &SymbolicConfig,
+        depth: usize,
+    ) -> Vec<String> {
+        if depth > config.max_depth {
+            return vec!["null".to_string()];
+        }
+
+        let limit = config.max_breadth;
+
+        match type_name {
+            "U32" | "I32" | "U64" | "I64" | "U128" | "I128" | "Val" => {
+                let base = ["0", "1", "-1", "42", "2147483647", "-2147483648", "1000000"];
+                base.into_iter()
+                    .take(limit)
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+            "Bool" => vec!["true".to_string(), "false".to_string()],
+            "Void" => vec!["null".to_string()],
+            "String" | "Symbol" => {
+                let base = [
+                    "\"\"",
+                    "\"a\"",
+                    "\"hello\"",
+                    "\"long_string_example\"",
+                    "\"#!*\"",
+                ];
+                base.into_iter()
+                    .take(limit)
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+            "Address" => {
+                let base = [
+                    "\"GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\"",
+                    "\"CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4H\"",
+                    "\"GD5DJ3B6A2KHSXLYJZ3IGR7Q5UMVJ5J4GQTKTQYQDQXJQJ5YQZQKQZQ\"",
+                ];
+                base.into_iter()
+                    .take(limit)
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+            "Bytes" | "BytesN" => {
+                let base = ["\"0x\"", "\"0x00\"", "\"0xffffffff\"", "\"base64:AQID\""];
+                base.into_iter()
+                    .take(limit)
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+            t if t.starts_with("Option<") => {
+                let inner = &t[7..t.len() - 1];
+                let mut seeds = vec!["null".to_string()];
+                seeds.extend(self.generate_seeds_for_type(inner, config, depth + 1));
+                seeds.into_iter().take(limit).collect()
+            }
+            t if t.starts_with("Vec<") => {
+                let inner = &t[4..t.len() - 1];
+                let inner_seeds = self.generate_seeds_for_type(inner, config, depth + 1);
+                let mut seeds = vec!["[]".to_string()];
+                if !inner_seeds.is_empty() {
+                    seeds.push(format!("[{}]", inner_seeds[0]));
+                    if inner_seeds.len() > 1 {
+                        seeds.push(format!("[{}, {}]", inner_seeds[0], inner_seeds[1]));
+                    }
+                }
+                seeds.into_iter().take(limit).collect()
+            }
+            t if t.starts_with("Map<") => {
+                // Simplified Map generation: focus on empty and single entry
+                vec!["{}".to_string()]
+            }
+            t if t.starts_with("Tuple<") => {
+                let inner_part = &t[6..t.len() - 1];
+                let parts: Vec<&str> = inner_part.split(',').map(|s| s.trim()).collect();
+                let mut tuple_elements = Vec::new();
+                for part in parts {
+                    let s = self.generate_seeds_for_type(part, config, depth + 1);
+                    tuple_elements.push(s.first().cloned().unwrap_or("null".to_string()));
+                }
+                vec![format!("[{}]", tuple_elements.join(", "))]
+            }
+            _ => vec!["0".to_string()], // Fallback for UDTs or unknown types
+        }
+    }
+
     fn generate_input_combinations(&self, arg_count: usize, max_cases: usize) -> GeneratedInputs {
-        // Values representing symbolic extremes
-        let values = vec!["0", "1", "-1", "42", "2147483647", "-2147483648"];
+        let numeric_seeds = ["0", "1", "-1", "42", "2147483647", "-2147483648"];
 
         if max_cases == 0 {
             return GeneratedInputs {
@@ -325,43 +489,7 @@ impl SymbolicAnalyzer {
             };
         }
 
-        if arg_count == 1 {
-            for v in &values {
-                if combinations.len() >= max_cases {
-                    return GeneratedInputs {
-                        combinations,
-                        truncated_by_input_cap: true,
-                    };
-                }
-                combinations.push(format!("[{}]", v));
-            }
-            return GeneratedInputs {
-                combinations,
-                truncated_by_input_cap: false,
-            };
-        }
-
-        if arg_count == 2 {
-            for v1 in &values {
-                for v2 in &values {
-                    if combinations.len() >= max_cases {
-                        return GeneratedInputs {
-                            combinations,
-                            truncated_by_input_cap: true,
-                        };
-                    }
-                    combinations.push(format!("[{}, {}]", v1, v2));
-                }
-            }
-            return GeneratedInputs {
-                combinations,
-                truncated_by_input_cap: false,
-            };
-        }
-
-        // Generic cartesian product for 3+ args with a capped exploration budget.
-        // Keep breadth while avoiding exponential blowups.
-        let narrowed = &values[..cmp::min(values.len(), 4)];
+        let narrowed = &numeric_seeds[..cmp::min(numeric_seeds.len(), 4)];
         let mut current = vec![0usize; arg_count];
         loop {
             let args = current
@@ -495,6 +623,7 @@ fn toml_basic_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::wasm::FunctionParam;
 
     fn push_u32_leb(mut value: u32, out: &mut Vec<u8>) {
         loop {
@@ -656,8 +785,10 @@ mod tests {
         let wasm = wasm_with_import_and_exported_local();
         let config = SymbolicConfig {
             max_paths: 3,
-            max_input_combinations: 36,
+            max_input_combinations: 16,
             timeout_secs: 30,
+            max_breadth: 5,
+            max_depth: 3,
         };
 
         let report = analyzer
@@ -666,7 +797,7 @@ mod tests {
 
         assert_eq!(report.paths_explored, 3);
         assert!(report.metadata.truncated_by_path_cap);
-        assert_eq!(report.metadata.generated_input_combinations, 36);
+        assert_eq!(report.metadata.generated_input_combinations, 16);
         assert_eq!(report.metadata.attempted_input_combinations, 3);
     }
 
@@ -700,5 +831,70 @@ mod tests {
         assert!(toml.contains("[metadata]"));
         assert!(toml.contains("max_paths = 25"));
         assert!(toml.contains("truncated_by_input_cap = true"));
+    }
+
+    #[test]
+    fn test_generate_seeds_for_primitive_types() {
+        let analyzer = SymbolicAnalyzer::new();
+        let config = SymbolicConfig::fast();
+
+        let u32_seeds = analyzer.generate_seeds_for_type("U32", &config, 0);
+        assert_eq!(u32_seeds, vec!["0", "1", "-1"]); // max_breadth = 3 in fast config
+
+        let bool_seeds = analyzer.generate_seeds_for_type("Bool", &config, 0);
+        assert_eq!(bool_seeds, vec!["true", "false"]);
+    }
+
+    #[test]
+    fn test_generate_seeds_for_option_type() {
+        let analyzer = SymbolicAnalyzer::new();
+        let config = SymbolicConfig::fast();
+
+        let option_seeds = analyzer.generate_seeds_for_type("Option<U32>", &config, 0);
+        assert_eq!(option_seeds, vec!["null", "0", "1"]); // limit = 3
+    }
+
+    #[test]
+    #[ignore = "Stubbed until inferno dependency is resolved"]
+    fn test_flame_graph_generation_from_report() {
+        let analyzer = SymbolicAnalyzer::new();
+        let config = SymbolicConfig::fast();
+    }
+
+    #[test]
+    fn test_generate_seeds_for_vec_type() {
+        let analyzer = SymbolicAnalyzer::new();
+        let config = SymbolicConfig::fast();
+
+        let vec_seeds = analyzer.generate_seeds_for_type("Vec<U32>", &config, 0);
+        assert!(vec_seeds.contains(&"[]".to_string()));
+        assert!(vec_seeds.contains(&"[0]".to_string()));
+    }
+
+    #[test]
+    fn test_generate_type_aware_inputs_combines_correctly() {
+        let analyzer = SymbolicAnalyzer::new();
+        let config = SymbolicConfig::fast();
+        let sig = ContractFunctionSignature {
+            name: "test".to_string(),
+            params: vec![
+                FunctionParam {
+                    name: "a".to_string(),
+                    type_name: "Bool".to_string(),
+                },
+                FunctionParam {
+                    name: "b".to_string(),
+                    type_name: "Void".to_string(),
+                },
+            ],
+            return_type: None,
+        };
+
+        let generated = analyzer.generate_type_aware_inputs(&sig, &config);
+        assert_eq!(generated.combinations.len(), 2);
+        assert!(generated.combinations.contains(&"[true, null]".to_string()));
+        assert!(generated
+            .combinations
+            .contains(&"[false, null]".to_string()));
     }
 }
