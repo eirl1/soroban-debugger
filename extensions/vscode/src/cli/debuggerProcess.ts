@@ -29,6 +29,7 @@ export interface DebuggerExecutionResult {
   output: string;
   paused: boolean;
   completed: boolean;
+  sourceLocation?: SourceLocation;
 }
 
 export interface DebuggerInspection {
@@ -37,18 +38,26 @@ export interface DebuggerInspection {
   stepCount: number;
   paused: boolean;
   callStack: string[];
+  sourceLocation?: SourceLocation;
 }
 
 export interface DebuggerContinueResult {
   completed: boolean;
   output?: string;
   paused: boolean;
+  sourceLocation?: SourceLocation;
 }
 
 export interface BackendBreakpointCapabilities {
   conditionalBreakpoints: boolean;
   hitConditionalBreakpoints: boolean;
   logPoints: boolean;
+}
+
+export interface SourceLocation {
+  file: string;
+  line: number;
+  column?: number;
 }
 
 export type LaunchPreflightQuickFix =
@@ -127,8 +136,8 @@ type DebugRequest =
   | { type: 'Continue' }
   | { type: 'Inspect' }
   | { type: 'GetStorage' }
-  | { type: 'SetBreakpoint'; function: string }
-  | { type: 'ClearBreakpoint'; function: string }
+  | { type: 'SetBreakpoint'; id: string; function: string; condition?: string; hit_condition?: string; log_message?: string }
+  | { type: 'ClearBreakpoint'; id: string }
   | { type: 'ResolveSourceBreakpoints'; source_path: string; lines: number[]; exported_functions: string[] }
   | { type: 'Evaluate'; expression: string; frame_id?: number }
   | { type: 'Cancel' }
@@ -144,10 +153,14 @@ type DebugResponse =
   | { type: 'Authenticated'; success: boolean; message: string }
   | { type: 'ContractLoaded'; size: number }
   | { type: 'ExecutionResult'; success: boolean; output: string; error?: string; paused: boolean; completed: boolean }
-  | { type: 'StepResult'; paused: boolean; current_function?: string; step_count: number }
-  | { type: 'ContinueResult'; completed: boolean; output?: string; error?: string; paused: boolean }
-  | { type: 'InspectionResult'; function?: string; args?: string; step_count: number; paused: boolean; call_stack: string[] }
+  | { type: 'StepResult'; paused: boolean; current_function?: string; step_count: number; source_location?: SourceLocation }
+  | { type: 'StepOverLineResult'; paused: boolean; file?: string; line?: number; column?: number }
+  | { type: 'ContinueResult'; completed: boolean; output?: string; error?: string; paused: boolean; source_location?: SourceLocation }
+  | { type: 'InspectionResult'; function?: string; args?: string; step_count: number; paused: boolean; call_stack: string[]; source_location?: SourceLocation }
   | { type: 'StorageState'; storage_json: string }
+  | { type: 'CallStack'; stack: string[] }
+  | { type: 'BudgetInfo'; cpu_instructions: number; memory_bytes: number }
+  | { type: 'Error'; message: string }
   | { type: 'SnapshotLoaded'; summary: string }
   | { type: 'BreakpointSet'; function: string }
   | { type: 'BreakpointCleared'; function: string }
@@ -420,7 +433,8 @@ export class DebuggerProcess {
       args: response.args,
       stepCount: response.step_count,
       paused: response.paused,
-      callStack: response.call_stack
+      callStack: response.call_stack,
+      sourceLocation: response.source_location
     };
   }
 
@@ -504,7 +518,7 @@ export class DebuggerProcess {
         binaryPath,
         ['inspect', '--contract', this.config.contractPath, '--functions'],
         { env: process.env },
-        (error, stdout, stderr) => {
+        (error: Error | null, stdout: string, stderr: string) => {
           clearTimeout(timer);
           if (error) {
             reject(new Error(stderr || stdout || String(error)));
@@ -634,7 +648,7 @@ export class DebuggerProcess {
         }
 
         const port = address.port;
-        server.close((error) => {
+        server.close((error: Error | undefined) => {
           if (error) {
             reject(error);
             return;
@@ -767,8 +781,8 @@ export class DebuggerProcess {
           }
           this.pendingRequests.delete(id);
           pending.cleanup();
-          pending.reject(new DebuggerTimeoutError(request.type, options.timeoutMs as number));
-        }, options.timeoutMs);
+          pending.reject(new DebuggerTimeoutError(request.type, timeoutMs));
+        }, timeoutMs);
       }
 
       if (options?.signal) {
@@ -1041,7 +1055,7 @@ function isCommandOnPath(command: string): boolean {
   const extensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
         .split(';')
-        .filter((ext) => ext.length > 0)
+        .filter((ext: string) => ext.length > 0)
     : [''];
 
   for (const directory of pathValue.split(path.delimiter)) {
