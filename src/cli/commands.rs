@@ -1,4 +1,4 @@
-use crate::cli::args::{
+﻿use crate::cli::args::{
     AnalyzeArgs, CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RemoteArgs,
     ReplArgs, ReplayArgs, RunArgs, ServerArgs, SymbolicArgs, TuiArgs, UpgradeCheckArgs, Verbosity,
 };
@@ -141,7 +141,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     if args.verbose || verbosity == Verbosity::Verbose {
         print_info(format!("SHA-256: {}", wasm_hash));
         if args.expected_hash.is_some() {
-            print_success("Checksum verified ✓");
+            print_success("Checksum verified âœ“");
         }
     }
 
@@ -470,7 +470,7 @@ fn run_dry_run(args: &RunArgs) -> Result<()> {
     if args.verbose {
         print_info(format!("[DRY RUN] SHA-256: {}", wasm_hash));
         if args.expected_hash.is_some() {
-            print_success("[DRY RUN] Checksum verified ✓");
+            print_success("[DRY RUN] Checksum verified âœ“");
         }
     }
 
@@ -577,7 +577,7 @@ pub fn interactive(args: InteractiveArgs, _verbosity: Verbosity) -> Result<()> {
     if _verbosity == Verbosity::Verbose {
         print_info(format!("SHA-256: {}", wasm_hash));
         if args.expected_hash.is_some() {
-            print_success("Checksum verified ✓");
+            print_success("Checksum verified âœ“");
         }
     }
 
@@ -668,7 +668,7 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
     if _verbosity == Verbosity::Verbose {
         print_info(format!("SHA-256: {}", wasm_hash));
         if args.expected_hash.is_some() {
-            print_success("Checksum verified ✓");
+            print_success("Checksum verified âœ“");
         }
     }
 
@@ -697,7 +697,7 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
             println!("  (No exported functions found)");
         } else {
             for function in functions {
-                println!("  {} {}", OutputConfig::to_ascii("•"), function);
+                println!("  {} {}", OutputConfig::to_ascii("â€¢"), function);
             }
         }
     }
@@ -826,7 +826,7 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
         println!("{}", "=".repeat(54));
 
         if report.findings.is_empty() {
-            println!("\n  ✅ No vulnerabilities detected.");
+            println!("\n  âœ… No vulnerabilities detected.");
         } else {
             for finding in &report.findings {
                 println!(
@@ -909,7 +909,7 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     if _verbosity == Verbosity::Verbose {
         print_info(format!("SHA-256: {}", wasm_hash));
         if args.expected_hash.is_some() {
-            print_success("Checksum verified ✓");
+            print_success("Checksum verified âœ“");
         }
     }
 
@@ -991,7 +991,7 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     Ok(())
 }
 
-/// ✅ Execute the profile command (hotspots + suggestions)
+/// âœ… Execute the profile command (hotspots + suggestions)
 pub fn profile(args: ProfileArgs) -> Result<()> {
     println!("Profiling contract execution: {:?}", args.contract);
 
@@ -1169,14 +1169,14 @@ fn print_warning(message: impl AsRef<str>) {
     }
 }
 
-/// Print the final contract return value — always shown regardless of verbosity.
+/// Print the final contract return value â€” always shown regardless of verbosity.
 fn print_result(message: impl AsRef<str>) {
     if !Formatter::is_quiet() {
         println!("{}", Formatter::success(message));
     }
 }
 
-/// Print verbose-only detail — only shown when --verbose is active.
+/// Print verbose-only detail â€” only shown when --verbose is active.
 fn print_verbose(message: impl AsRef<str>) {
     if Formatter::is_verbose() {
         println!("{}", Formatter::info(message));
@@ -1653,8 +1653,8 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         print_verbose(format!("SHA-256: {}", wasm_hash));
         output_writer.write(&format!("SHA-256: {}", wasm_hash))?;
         if args.expected_hash.is_some() {
-            print_verbose("Checksum verified ✓");
-            output_writer.write("Checksum verified ✓")?;
+            print_verbose("Checksum verified âœ“");
+            output_writer.write("Checksum verified âœ“")?;
         }
     }
 
@@ -2165,7 +2165,7 @@ fn run_dry_run(args: &RunArgs) -> Result<()> {
     if args.verbose {
         print_verbose(format!("[DRY RUN] SHA-256: {}", wasm_hash));
         if args.expected_hash.is_some() {
-            print_verbose("[DRY RUN] Checksum verified ✓");
+            print_verbose("[DRY RUN] Checksum verified âœ“");
         }
     }
 
@@ -2501,7 +2501,7 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     if _verbosity == Verbosity::Verbose {
         print_verbose(format!("SHA-256: {}", wasm_hash));
         if args.expected_hash.is_some() {
-            print_verbose("Checksum verified ✓");
+            print_verbose("Checksum verified âœ“");
         }
     }
 
@@ -2586,7 +2586,7 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     Ok(())
 }
 
-/// ✅ Execute the profile command (hotspots + suggestions)
+/// âœ… Execute the profile command (hotspots + suggestions)
 pub fn profile(args: ProfileArgs) -> Result<()> {
     logging::log_display(
         format!("Profiling contract execution: {:?}", args.contract),
@@ -2795,9 +2795,9 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
         || format!("\"{replayed_result}\"") == original_return_str;
 
     if results_match {
-        print_success("✓ Results match! Replayed execution produced the same output.");
+        print_success("âœ“ Results match! Replayed execution produced the same output.");
     } else {
-        print_warning("✗ Results differ!");
+        print_warning("âœ— Results differ!");
         print_info(format!("  Original: {}", original_return_str));
         print_info(format!("  Replayed: {}", replayed_result));
     }
@@ -2822,7 +2822,7 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 
         match cpu_diff.cmp(&0) {
             std::cmp::Ordering::Equal => {
-                print_success("  CPU usage matches exactly ✓");
+                print_success("  CPU usage matches exactly âœ“");
             }
             std::cmp::Ordering::Greater => {
                 print_warning(format!("  CPU increased by {} instructions", cpu_diff));
@@ -2845,7 +2845,7 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 
         match mem_diff.cmp(&0) {
             std::cmp::Ordering::Equal => {
-                print_success("  Memory usage matches exactly ✓");
+                print_success("  Memory usage matches exactly âœ“");
             }
             std::cmp::Ordering::Greater => {
                 print_warning(format!("  Memory increased by {} bytes", mem_diff));
@@ -2877,9 +2877,9 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
         ));
 
         if results_match {
-            report.push_str("✓ **Results match**\n\n");
+            report.push_str("âœ“ **Results match**\n\n");
         } else {
-            report.push_str("✗ **Results differ**\n\n");
+            report.push_str("âœ— **Results differ**\n\n");
         }
 
         if let Some(original_budget) = &original_trace.budget {
@@ -3186,13 +3186,13 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> crat
         println!();
         if cpu_reg > 0.0 {
             print_warning(format!(
-                "⚠️ ALERT: CPU usage regression detected! Increased by {:.2}% compared to the previous run.",
+                "âš ï¸ ALERT: CPU usage regression detected! Increased by {:.2}% compared to the previous run.",
                 cpu_reg
             ));
         }
         if mem_reg > 0.0 {
             print_warning(format!(
-                "⚠️ ALERT: Memory usage regression detected! Increased by {:.2}% compared to the previous run.",
+                "âš ï¸ ALERT: Memory usage regression detected! Increased by {:.2}% compared to the previous run.",
                 mem_reg
             ));
         }
@@ -3915,7 +3915,7 @@ pub async fn repl(args: ReplArgs) -> Result<()> {
     crate::utils::wasm::verify_wasm_hash(&wasm_file.sha256_hash, args.expected_hash.as_ref())?;
 
     if args.expected_hash.is_some() {
-        print_verbose("Checksum verified ✓");
+        print_verbose("Checksum verified âœ“");
     }
 
     crate::repl::start_repl(ReplConfig {
