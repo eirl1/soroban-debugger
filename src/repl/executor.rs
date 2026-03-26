@@ -36,14 +36,13 @@ impl ReplExecutor {
         executor.enable_mock_all_auths();
 
         if let Some(snapshot_path) = &config.network_snapshot {
-            let loader = crate::simulator::SnapshotLoader::from_file(snapshot_path)
-                .map_err(|e| miette::miette!("Failed to load network snapshot {:?}: {}", snapshot_path, e))?;
+            let loader =
+                crate::simulator::SnapshotLoader::from_file(snapshot_path).map_err(|e| {
+                    miette::miette!("Failed to load network snapshot {:?}: {}", snapshot_path, e)
+                })?;
             let loaded = loader.apply_to_environment()?;
             executor.apply_snapshot_ledger(&loaded)?;
-            crate::logging::log_display(
-                loaded.format_summary(),
-                crate::logging::LogLevel::Info,
-            );
+            crate::logging::log_display(loaded.format_summary(), crate::logging::LogLevel::Info);
         }
 
         if let Some(storage_json) = &config.storage {

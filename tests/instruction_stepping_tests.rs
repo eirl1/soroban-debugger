@@ -173,7 +173,7 @@ fn test_call_stack_tracking() {
     ip.push_return_address(10);
     assert_eq!(ip.call_stack_depth(), 1);
 
-    let mut block_inst = Instruction::new(
+    let block_inst = Instruction::new(
         0x100,
         wasmparser::Operator::Block {
             blockty: wasmparser::BlockType::Empty,

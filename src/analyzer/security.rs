@@ -341,8 +341,7 @@ fn is_cross_contract_host_function_name(name: &str) -> bool {
         if n == *base {
             return true;
         }
-        if n.starts_with(base) {
-            let suffix = &n[base.len()..];
+        if let Some(suffix) = n.strip_prefix(base) {
             if suffix.is_empty() {
                 return true;
             }

@@ -1,4 +1,4 @@
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use gimli::{Dwarf, EndianSlice, RunTimeEndian};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -23,6 +23,12 @@ pub struct SourceMap {
     code_section_range: Option<std::ops::Range<usize>>,
 }
 
+impl Default for SourceMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SourceMap {
     /// Create a new empty source map
     pub fn new() -> Self {
@@ -40,8 +46,9 @@ impl SourceMap {
 
         let mut custom_sections: HashMap<String, &[u8]> = HashMap::new();
         for payload in Parser::new(0).parse_all(wasm_bytes) {
-            let payload = payload
-                .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to parse WASM: {}", e)))?;
+            let payload = payload.map_err(|e| {
+                DebuggerError::WasmLoadError(format!("Failed to parse WASM: {}", e))
+            })?;
             if let Payload::CustomSection(reader) = payload {
                 custom_sections.insert(reader.name().to_string(), reader.data());
             }
@@ -67,18 +74,22 @@ impl SourceMap {
         })?;
 
         let mut units = dwarf.units();
-        while let Some(header) = units.next()
-            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to read DWARF unit: {}", e)))? {
-            let unit = dwarf.unit(header)
-                .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to load DWARF unit: {}", e)))?;
+        while let Some(header) = units.next().map_err(|e| {
+            DebuggerError::WasmLoadError(format!("Failed to read DWARF unit: {}", e))
+        })? {
+            let unit = dwarf.unit(header).map_err(|e| {
+                DebuggerError::WasmLoadError(format!("Failed to load DWARF unit: {}", e))
+            })?;
             if let Some(program) = unit.line_program.clone() {
                 let mut rows = program.rows();
-                while let Some((header, row)) = rows.next_row()
-                    .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to read DWARF line row: {}", e)))? {
+                while let Some((header, row)) = rows.next_row().map_err(|e| {
+                    DebuggerError::WasmLoadError(format!("Failed to read DWARF line row: {}", e))
+                })? {
                     if let Some(file_path) =
                         self.get_file_path(&dwarf, &unit, header, row.file_index())
                     {
-                        let offset = self.normalize_wasm_offset(row.address() as usize, wasm_bytes.len());
+                        let offset =
+                            self.normalize_wasm_offset(row.address() as usize, wasm_bytes.len());
                         let line = row.line().map(|l| l.get() as u32).unwrap_or(0);
                         let column = match row.column() {
                             gimli::ColumnType::LeftEdge => None,
