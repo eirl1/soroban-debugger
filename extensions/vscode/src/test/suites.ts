@@ -328,7 +328,10 @@ export async function runSmokeSuite(): Promise<void> {
     await debuggerProcess.ping();
 
     const timedOut = debuggerProcess.evaluate('2', undefined, { timeoutMs: 20 });
-    await assert.rejects(timedOut, (error: any) => error?.name === 'TimeoutError');
+    await assert.rejects(
+      timedOut,
+      (error: any) => error instanceof DebuggerTimeoutError,
+    );
 
     await wait(250);
     assert.equal(
