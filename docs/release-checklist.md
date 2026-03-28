@@ -14,6 +14,10 @@ Use this for:
 - **Security/Analyzer Owner:** owns `analyze` sanity and any security-facing changes
 - **Performance Owner:** owns benchmark sanity gates
 
+## PR Quality Gates
+
+- [ ] All merged PRs in this release window documented CI/test behavior changes or explicitly marked N/A
+
 ## Required Gates (no waivers by default)
 
 ### Rust (workspace)

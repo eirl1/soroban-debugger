@@ -287,6 +287,7 @@ Tips:
 - [ ] Clippy is clean (`cargo clippy --workspace --all-targets --all-features -- -D warnings`)
 - [ ] Commit message follows [Conventional Commits](https://www.conventionalcommits.org/)
 - [ ] PR description mentions the related issue(s)
+- [ ] CI/test behavior changes documented in PR description (or marked N/A — see "CI/Test Behavior Changes" section in PR template)
 - [ ] If CLI flags/subcommands/help text changed, man pages regenerated (`make regen-man`) and `.1` files committed
 
 **Steps:**
