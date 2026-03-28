@@ -75,7 +75,8 @@ export function parseFunctionRanges(sourcePath: string): FunctionRange[] {
 export function resolveSourceBreakpoints(
   sourcePath: string,
   lines: number[],
-  exportedFunctions: Set<string>
+  exportedFunctions: Set<string>,
+  previousFunctionMap?: Map<number, string>
 ): ResolvedBreakpoint[] {
   const ranges = parseFunctionRanges(sourcePath)
 
@@ -84,6 +85,34 @@ export function resolveSourceBreakpoints(
       (candidate) => line >= candidate.startLine && line <= candidate.endLine
     )
     if (!range) {
+      if (previousFunctionMap) {
+        const prevFn = previousFunctionMap.get(line)
+        if (prevFn) {
+          const fnRange = ranges.find((r) => r.name === prevFn)
+          if (fnRange) {
+            if (!exportedFunctions.has(prevFn)) {
+              return {
+                requestedLine: line,
+                line: fnRange.startLine,
+                verified: false,
+                functionName: prevFn,
+                reasonCode: 'HEURISTIC_NOT_EXPORTED',
+                setBreakpoint: false,
+                message: `Rust function '${prevFn}' is not an exported contract entrypoint`,
+              }
+            }
+            return {
+              requestedLine: line,
+              line: fnRange.startLine,
+              verified: false,
+              functionName: prevFn,
+              reasonCode: 'HEURISTIC_REANCHORED',
+              setBreakpoint: true,
+              message: `Breakpoint re-anchored to '${prevFn}' after source edit (was line ${line}, now line ${fnRange.startLine})`,
+            }
+          }
+        }
+      }
       return {
         requestedLine: line,
         line,

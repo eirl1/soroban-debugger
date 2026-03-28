@@ -100,6 +100,7 @@ export class SorobanDebugSession extends DebugSession {
   private hasExecuted = false;
   private exportedFunctions = new Set<string>();
   private sourceFunctionBreakpoints = new Map<string, Set<string>>();
+  private breakpointFunctionHistory = new Map<string, Map<number, string>>();
   private requestAbortControllers = new Map<number, AbortController>();
   private refreshAbortController: AbortController | null = null;
   private refreshGeneration = 0;
@@ -221,8 +222,9 @@ export class SorobanDebugSession extends DebugSession {
           ? serverResolved.every((bp) => ['NO_DEBUG_INFO', 'FILE_NOT_IN_DEBUG_INFO', 'WASM_PARSE_ERROR'].includes(bp.reasonCode))
           : false;
 
+        const sourceHistory = this.breakpointFunctionHistory.get(source);
         if (serverResolved && shouldFallbackHeuristic) {
-          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions, sourceHistory);
         } else if (serverResolved) {
           resolved = serverResolved.map((bp) => ({
             requestedLine: bp.requestedLine,
@@ -234,7 +236,7 @@ export class SorobanDebugSession extends DebugSession {
             setBreakpoint: bp.verified && Boolean(bp.functionName)
           }));
         } else {
-          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions, sourceHistory);
         }
       }
 
@@ -292,6 +294,20 @@ export class SorobanDebugSession extends DebugSession {
             .map((bp) => bp.functionName as string)
         )
       );
+
+      const updatedHistory = this.breakpointFunctionHistory.get(source) ?? new Map<number, string>();
+      for (const bp of resolved) {
+        if (bp.functionName) {
+          updatedHistory.set(bp.requestedLine, bp.functionName);
+        } else {
+          updatedHistory.delete(bp.requestedLine);
+        }
+      }
+      if (updatedHistory.size > 0) {
+        this.breakpointFunctionHistory.set(source, updatedHistory);
+      } else {
+        this.breakpointFunctionHistory.delete(source);
+      }
 
       response.body = {
         breakpoints: breakpoints.map((bp) => {
@@ -920,6 +936,7 @@ export class SorobanDebugSession extends DebugSession {
     this.state.args = undefined;
     this.hasExecuted = false;
     this.sourceFunctionBreakpoints.clear();
+    this.breakpointFunctionHistory.clear();
   }
 
   private describeCapabilityFallback(bp: DebugProtocol.SourceBreakpoint): string | undefined {

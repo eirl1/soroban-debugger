@@ -4,6 +4,7 @@ import * as assert from 'assert'
 import { ChildProcess, spawn } from 'child_process'
 import * as fs from 'fs'
 import * as net from 'net'
+import * as os from 'os'
 import * as path from 'path'
 import {
   DebuggerProcess,
@@ -285,6 +286,70 @@ async function main(): Promise<void> {
     assert.equal(addrVar.type, 'address')
 
     console.log('Variable rendering unit tests passed')
+  }
+
+  {
+    // Breakpoint re-anchoring across source edits
+    const tmpFile = path.join(os.tmpdir(), `bp_reanchor_${Date.now()}.rs`)
+    const originalSource = [
+      'pub fn helper() {',
+      '  let x = 1;',
+      '}',
+      '',
+      'pub fn foo(env: Env) -> u32 {',
+      '  let y = 2;',
+      '  y',
+      '}',
+      '',
+    ].join('\n')
+    fs.writeFileSync(tmpFile, originalSource)
+
+    // foo spans lines 5-8; line 7 is inside foo
+    const exportedFns = new Set(['foo'])
+    const initial = resolveSourceBreakpoints(tmpFile, [7], exportedFns)
+    assert.equal(initial[0].functionName, 'foo', 'Expected line 7 to map to foo')
+
+    // Build history: line 7 was in foo
+    const history = new Map([[7, 'foo']])
+
+    // Edit: insert 5 comment lines between helper and foo
+    const editedSource = [
+      'pub fn helper() {',
+      '  let x = 1;',
+      '}',
+      '',
+      '// added line 1',
+      '// added line 2',
+      '// added line 3',
+      '// added line 4',
+      '// added line 5',
+      '',
+      'pub fn foo(env: Env) -> u32 {',
+      '  let y = 2;',
+      '  y',
+      '}',
+      '',
+    ].join('\n')
+    fs.writeFileSync(tmpFile, editedSource)
+
+    // Without history: line 7 is now a comment, not inside any function
+    const withoutHistory = resolveSourceBreakpoints(tmpFile, [7], exportedFns)
+    assert.equal(
+      withoutHistory[0].reasonCode,
+      'HEURISTIC_NO_FUNCTION',
+      'Expected line 7 to not map to any function after edit without history'
+    )
+
+    // With history: line 7 re-anchors to foo's new start (line 11)
+    const withHistory = resolveSourceBreakpoints(tmpFile, [7], exportedFns, history)
+    assert.equal(withHistory[0].functionName, 'foo', 'Expected re-anchored breakpoint to map to foo')
+    assert.equal(withHistory[0].reasonCode, 'HEURISTIC_REANCHORED', 'Expected HEURISTIC_REANCHORED reason code')
+    assert.equal(withHistory[0].line, 11, 'Expected re-anchored line to be new foo start')
+    assert.equal(withHistory[0].requestedLine, 7, 'Expected requestedLine to remain the original line')
+    assert.equal(withHistory[0].setBreakpoint, true, 'Expected re-anchored breakpoint to set runtime breakpoint')
+
+    fs.unlinkSync(tmpFile)
+    console.log('Breakpoint re-anchoring tests passed')
   }
 
   {
