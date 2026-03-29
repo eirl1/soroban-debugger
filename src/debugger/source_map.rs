@@ -943,6 +943,49 @@ mod tests {
         bytes
     }
 
+    fn push_section(bytes: &mut Vec<u8>, section_id: u8, payload: &[u8]) {
+        bytes.push(section_id);
+        bytes.extend_from_slice(&uleb128(payload.len()));
+        bytes.extend_from_slice(payload);
+    }
+
+    fn wasm_with_functions_and_exports(exports: &[(&str, u32)], function_count: u32) -> Vec<u8> {
+        let mut bytes = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+
+        let type_section = vec![0x01, 0x60, 0x00, 0x00];
+        push_section(&mut bytes, 0x01, &type_section);
+
+        let mut function_section = Vec::new();
+        function_section.extend_from_slice(&uleb128(function_count as usize));
+        for _ in 0..function_count {
+            function_section.push(0x00);
+        }
+        push_section(&mut bytes, 0x03, &function_section);
+
+        if !exports.is_empty() {
+            let mut export_section = Vec::new();
+            export_section.extend_from_slice(&uleb128(exports.len()));
+            for (name, function_index) in exports {
+                export_section.extend_from_slice(&uleb128(name.len()));
+                export_section.extend_from_slice(name.as_bytes());
+                export_section.push(0x00);
+                export_section.extend_from_slice(&uleb128(*function_index as usize));
+            }
+            push_section(&mut bytes, 0x07, &export_section);
+        }
+
+        let mut code_section = Vec::new();
+        code_section.extend_from_slice(&uleb128(function_count as usize));
+        for _ in 0..function_count {
+            code_section.push(0x02);
+            code_section.push(0x00);
+            code_section.push(0x0b);
+        }
+        push_section(&mut bytes, 0x0a, &code_section);
+
+        bytes
+    }
+
     #[test]
     fn first_load_increments_parse_count() {
         let mut sm = SourceMap::new();
@@ -1080,5 +1123,77 @@ mod tests {
             sm.lookup(42).is_none(),
             "stale mappings must be cleared on cache miss"
         );
+    }
+
+    #[test]
+    fn resolve_source_breakpoints_reports_not_exported_for_private_function() {
+        let wasm = wasm_with_functions_and_exports(&[("entrypoint", 0)], 2);
+        let index = WasmIndex::parse(&wasm).unwrap();
+        let private_offset = index.function_bodies[1].0.start;
+        let source_path = PathBuf::from("contract.rs");
+
+        let mut sm = SourceMap::new();
+        sm.add_mapping(
+            private_offset,
+            SourceLocation {
+                file: source_path.clone(),
+                line: 7,
+                column: None,
+            },
+        );
+
+        let exported_functions = HashSet::from([String::from("entrypoint")]);
+        let resolved =
+            sm.resolve_source_breakpoints(&wasm, &source_path, &[7], &exported_functions);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].requested_line, 7);
+        assert_eq!(resolved[0].line, 7);
+        assert!(!resolved[0].verified);
+        assert_eq!(resolved[0].function, None);
+        assert_eq!(resolved[0].reason_code, "NOT_EXPORTED");
+        assert!(resolved[0].message.contains("[NOT_EXPORTED]"));
+        assert!(resolved[0].message.contains("[1]"));
+    }
+
+    #[test]
+    fn resolve_source_breakpoints_reports_ambiguous_for_multiple_entrypoints() {
+        let wasm = wasm_with_functions_and_exports(&[("alpha", 0), ("beta", 1)], 2);
+        let index = WasmIndex::parse(&wasm).unwrap();
+        let alpha_offset = index.function_bodies[0].0.start;
+        let beta_offset = index.function_bodies[1].0.start;
+        let source_path = PathBuf::from("contract.rs");
+
+        let mut sm = SourceMap::new();
+        sm.add_mapping(
+            alpha_offset,
+            SourceLocation {
+                file: source_path.clone(),
+                line: 10,
+                column: None,
+            },
+        );
+        sm.add_mapping(
+            beta_offset,
+            SourceLocation {
+                file: source_path.clone(),
+                line: 10,
+                column: None,
+            },
+        );
+
+        let exported_functions = HashSet::from([String::from("alpha"), String::from("beta")]);
+        let resolved =
+            sm.resolve_source_breakpoints(&wasm, &source_path, &[10], &exported_functions);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].requested_line, 10);
+        assert_eq!(resolved[0].line, 10);
+        assert!(!resolved[0].verified);
+        assert_eq!(resolved[0].function, None);
+        assert_eq!(resolved[0].reason_code, "AMBIGUOUS");
+        assert!(resolved[0].message.contains("[AMBIGUOUS]"));
+        assert!(resolved[0].message.contains("alpha"));
+        assert!(resolved[0].message.contains("beta"));
     }
 }
