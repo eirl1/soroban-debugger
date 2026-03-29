@@ -10,6 +10,8 @@ mod network;
 fn test_server_cli_rejects_tls_cert_without_key() {
     let mut cmd: Command = assert_cmd::cargo::cargo_bin_cmd!("soroban-debug");
     cmd.arg("server")
+        .arg("--host")
+        .arg("127.0.0.1")
         .arg("--port")
         .arg("9230")
         .arg("--tls-cert")
@@ -25,6 +27,8 @@ fn test_server_cli_rejects_tls_cert_without_key() {
 fn test_server_cli_rejects_tls_key_without_cert() {
     let mut cmd: Command = assert_cmd::cargo::cargo_bin_cmd!("soroban-debug");
     cmd.arg("server")
+        .arg("--host")
+        .arg("127.0.0.1")
         .arg("--port")
         .arg("9231")
         .arg("--tls-key")
@@ -94,6 +98,8 @@ fn test_remote_run_execution() {
 
     let mut server_child = server_cmd
         .arg("server")
+        .arg("--host")
+        .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
         .arg("--token")

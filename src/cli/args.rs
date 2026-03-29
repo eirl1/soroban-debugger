@@ -262,6 +262,10 @@ pub struct RunArgs {
     #[arg(short, long, default_value = "9229")]
     pub port: u16,
 
+    /// Host/interface to bind when using --server
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Connect to a remote debugger (address:port)
     #[arg(long)]
     pub remote: Option<String>,
@@ -1032,6 +1036,10 @@ pub struct ReplayArgs {
 
 #[derive(Parser)]
 pub struct ServerArgs {
+    /// Host/interface to bind
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Port to listen on
     #[arg(short, long, default_value = "9229")]
     pub port: u16,

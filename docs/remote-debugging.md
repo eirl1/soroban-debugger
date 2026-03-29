@@ -27,13 +27,13 @@ On the remote system:
 
 ```bash
 # Only for trusted local development on an isolated machine.
-soroban-debug server --port 9229
+soroban-debug server --host 127.0.0.1 --port 9229
 
 # Token-protected server on a trusted private network.
-soroban-debug server --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
+soroban-debug server --host 127.0.0.1 --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
 
 # Token + TLS on an untrusted network.
-soroban-debug server --port 9229 \
+soroban-debug server --host 10.0.0.15 --port 9229 \
   --token "$SOROBAN_DEBUG_TOKEN" \
   --tls-cert /path/to/cert.pem \
   --tls-key /path/to/key.pem
@@ -88,6 +88,8 @@ Use one of these patterns:
 3. **TLS termination in front of the server**: place the server behind a reverse proxy, service mesh sidecar, or tunnel that provides authenticated encrypted transport.
 4. **Native TLS in the debugger**: use `--tls-cert` and `--tls-key` when the server itself is directly reachable over an untrusted network.
 
+The server defaults to `--host 127.0.0.1`. Use `--host` explicitly when you intend to bind to a private-network interface, and avoid `0.0.0.0` unless that exposure is intentional and protected.
+
 ### Token handling guidance
 
 - Generate tokens with a cryptographically secure RNG.
@@ -109,13 +111,13 @@ Prefer:
 
 ```bash
 export SOROBAN_DEBUG_TOKEN="$(openssl rand -hex 32)"
-soroban-debug server --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
+soroban-debug server --host 127.0.0.1 --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
 ```
 
 Avoid:
 
 ```bash
-soroban-debug server --port 9229 --token mySecretToken123
+soroban-debug server --host 0.0.0.0 --port 9229 --token mySecretToken123
 ```
 
 The second form is easy to leak through shell history, process listings, shared transcripts, and copied terminal logs.
@@ -135,6 +137,7 @@ openssl req -x509 -newkey rsa:4096 \
   -subj "/CN=localhost"
 
 soroban-debug server --port 9229 \
+  --host 127.0.0.1 \
   --token "$SOROBAN_DEBUG_TOKEN" \
   --tls-cert cert.pem \
   --tls-key key.pem
@@ -213,7 +216,7 @@ When the server receives a shutdown signal:
 ### Clean termination example
 
 ```bash
-soroban-debug server --port 9229 &
+soroban-debug server --host 127.0.0.1 --port 9229 &
 SERVER_PID=$!
 
 # Run your debug session
@@ -234,7 +237,7 @@ When running the server in CI, ensure proper cleanup:
 steps:
   - name: Start Debug Server
     run: |
-      soroban-debug server --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
+      soroban-debug server --host 127.0.0.1 --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
       echo $! > server.pid
       sleep 1
 
@@ -289,7 +292,7 @@ Example:
 steps:
   - name: Start Debug Server
     run: |
-      soroban-debug server --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
+      soroban-debug server --host 127.0.0.1 --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
       sleep 2
 
   - name: Remote Debug

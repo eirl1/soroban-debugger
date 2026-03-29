@@ -110,7 +110,7 @@ fn parity_cli_storage_import_export_flags_exist() {
 }
 
 /// SURFACE: CLI only
-/// The `server` subcommand must expose --port, --token, --tls-cert, --tls-key.
+/// The `server` subcommand must expose --host, --port, --token, --tls-cert, --tls-key.
 /// TLS flags in particular have no launch.json equivalent.
 #[test]
 fn parity_cli_server_command_flags_exist() {
@@ -118,6 +118,7 @@ fn parity_cli_server_command_flags_exist() {
         .args(["server", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("--host"))
         .stdout(predicate::str::contains("--port"))
         .stdout(predicate::str::contains("--token"))
         .stdout(predicate::str::contains("--tls-cert"))
@@ -299,7 +300,15 @@ fn parity_dap_server_starts_and_accepts_connection() {
     let token = "parity-test-token-ok";
 
     let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
-        .args(["server", "--port", &port.to_string(), "--token", token])
+        .args([
+            "server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--token",
+            token,
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -375,7 +384,15 @@ fn parity_dap_server_rejects_invalid_token() {
     let wrong_token = "wrong-parity-token";
 
     let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
-        .args(["server", "--port", &port.to_string(), "--token", real_token])
+        .args([
+            "server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--token",
+            real_token,
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -457,7 +474,15 @@ fn parity_dap_auth_before_handshake_is_accepted() {
     let token = "compat-test-token";
 
     let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
-        .args(["server", "--port", &port.to_string(), "--token", token])
+        .args([
+            "server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--token",
+            token,
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

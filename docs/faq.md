@@ -179,7 +179,7 @@ Key asymmetries at a glance:
 **Workaround:** Use an SSH tunnel to bridge the remote server to your local machine:
 ```bash
 # On the remote machine
-soroban-debug server --port 9229 --token $MY_TOKEN
+soroban-debug server --host 127.0.0.1 --port 9229 --token $MY_TOKEN
 
 # On your local machine (in a separate terminal)
 ssh -L 9229:localhost:9229 user@remote-host

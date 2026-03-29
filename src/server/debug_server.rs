@@ -22,6 +22,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
 pub struct DebugServer {
+    host: String,
     engine: Option<DebuggerEngine>,
     token: Option<String>,
     tls_config: Option<ServerConfig>,
@@ -39,6 +40,7 @@ struct PendingExecution {
 
 impl DebugServer {
     pub fn new(
+        host: String,
         token: Option<String>,
         cert_path: Option<&Path>,
         key_path: Option<&Path>,
@@ -56,6 +58,7 @@ impl DebugServer {
         };
 
         Ok(Self {
+            host,
             engine: None,
             token,
             tls_config,
@@ -68,7 +71,7 @@ impl DebugServer {
     }
 
     pub async fn run(mut self, port: u16) -> Result<()> {
-        let addr = format!("0.0.0.0:{}", port);
+        let addr = format!("{}:{}", self.host, port);
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| miette::miette!("Failed to bind to {}: {}", addr, e))?;
@@ -1188,7 +1191,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_on_signal() {
-        let server = DebugServer::new(None, None, None, None, Vec::new())
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
             .expect("Failed to create server");
         let shutdown = server.shutdown.clone();
 
@@ -1212,8 +1222,16 @@ mod tests {
 
     #[test]
     fn test_server_initialization() {
-        let server = DebugServer::new(None, None, None, None, Vec::new())
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
             .expect("Failed to create server");
+        assert_eq!(server.host, "127.0.0.1");
         assert!(server.engine.is_none());
         assert!(server.token.is_none());
         assert!(server.tls_config.is_none());
@@ -1222,15 +1240,22 @@ mod tests {
     #[test]
     fn test_server_with_token() {
         let token = "test-token-12345678".to_string();
-        let server =
-            DebugServer::new(Some(token.clone()), None, None, None, Vec::new())
-                .expect("Failed to create server");
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            Some(token.clone()),
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("Failed to create server");
         assert_eq!(server.token, Some(token));
     }
 
     #[test]
     fn test_server_rejects_partial_tls_configuration() {
         let err = DebugServer::new(
+            "127.0.0.1".to_string(),
             None,
             Some(Path::new("cert.pem")),
             None,

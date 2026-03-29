@@ -89,6 +89,7 @@ fn test_server_help_shows_auth_and_tls_options() {
     cmd.args(["server", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("--host"))
         .stdout(predicate::str::contains("--token"))
         .stdout(predicate::str::contains("--tls-cert"))
         .stdout(predicate::str::contains("--tls-key"));

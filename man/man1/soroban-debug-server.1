@@ -4,10 +4,13 @@
 .SH NAME
 server \- Start debug server for remote connections
 .SH SYNOPSIS
-\fBserver\fR [\fB\-p\fR|\fB\-\-port\fR] [\fB\-t\fR|\fB\-\-token\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-\-repeat\fR] [\fB\-\-storage\-filter\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBserver\fR [\fB\-\-host\fR] [\fB\-p\fR|\fB\-\-port\fR] [\fB\-t\fR|\fB\-\-token\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-\-repeat\fR] [\fB\-\-storage\-filter\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Start debug server for remote connections
 .SH OPTIONS
+.TP
+\fB\-\-host\fR \fI<HOST>\fR [default: 127.0.0.1]
+Host/interface to bind. Prefer loopback or a specific private-network address for remote debugging.
 .TP
 \fB\-p\fR, \fB\-\-port\fR \fI<PORT>\fR [default: 9229]
 Port to listen on
