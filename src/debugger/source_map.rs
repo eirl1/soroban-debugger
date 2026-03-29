@@ -334,6 +334,22 @@ impl SourceMap {
                     return Err(err);
                 }
 
+                // load() failed partway through: any mappings collected are
+                // partial. Downgrade "source" → "partial-source" so the mode
+                // accurately reflects that the parse did not complete.
+                let (fallback_mode, fallback_message) = if mappings_count > 0
+                    && fallback_mode == "source"
+                {
+                    (
+                        "partial-source".to_string(),
+                        "DWARF parse failed after collecting some mappings; \
+                         results may be incomplete."
+                            .to_string(),
+                    )
+                } else {
+                    (fallback_mode, fallback_message)
+                };
+
                 Ok(SourceMapInspectionReport {
                     mappings_count,
                     preview,
