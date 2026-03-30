@@ -37,6 +37,7 @@ fn test_server_cli_rejects_tls_key_without_cert() {
 }
 
 #[test]
+#[cfg(feature = "network-tests")]
 fn test_remote_run_execution() {
     if !network::can_bind_loopback() {
         eprintln!(

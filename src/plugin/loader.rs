@@ -438,32 +438,17 @@ impl Drop for LoadedPlugin {
 
 
 #[cfg(test)]
-impl LoadedPlugin {
-    pub(crate) fn from_parts_for_tests(
-        plugin: Box<dyn InspectorPlugin>,
-        path: PathBuf,
-        manifest: PluginManifest,
-        trust: PluginTrustAssessment,
-    ) -> Self {
-        Self {
-            plugin,
-            library: None,
-            path,
-            manifest,
-            trust,
-        }
 /// Checks if the plugin API version matches the host's expected version.
 pub fn check_api_version(plugin_version: u32) -> Result<(), crate::plugin::api::PluginError> {
     use crate::plugin::api::{PluginError, PLUGIN_API_VERSION};
     if plugin_version != PLUGIN_API_VERSION {
         return Err(PluginError::VersionMismatch {
-            expected: PLUGIN_API_VERSION,
-            found: plugin_version,
+            required: PLUGIN_API_VERSION.to_string(),
+            found: plugin_version.to_string(),
         });
     }
     Ok(())
 }
-    } }
 
 #[cfg(test)]
 mod tests {

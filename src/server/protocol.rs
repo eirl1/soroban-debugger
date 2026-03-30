@@ -120,6 +120,16 @@ pub struct SourceLocation {
     pub column: Option<u32>,
 }
 
+impl From<crate::debugger::source_map::SourceLocation> for SourceLocation {
+    fn from(loc: crate::debugger::source_map::SourceLocation) -> Self {
+        Self {
+            file: loc.file.to_string_lossy().to_string(),
+            line: loc.line,
+            column: loc.column,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BreakpointCapabilities {
     pub conditional_breakpoints: bool,

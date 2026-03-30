@@ -144,6 +144,9 @@ clap = { version = "4.5", features = ["derive", "cargo", "env"] }
 clap_mangen = "0.2"
 clap_complete = "4.5"
 
+[features]
+network-tests = []
+
 [profile.release]
 opt-level = 3
 lto = true

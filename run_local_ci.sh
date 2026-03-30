@@ -60,7 +60,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 echo
 echo "==> Tests (deny rustc warnings via RUSTFLAGS)"
-RUSTFLAGS="-D warnings" cargo test --workspace --all-features
+if [[ "$SANDBOX_MODE" -eq 1 ]]; then
+  RUSTFLAGS="-D warnings" cargo test --workspace
+else
+  RUSTFLAGS="-D warnings" cargo test --workspace --features network-tests
+fi
 
 if [[ "$ALLOW_TEMP_CHECKS" -eq 1 ]]; then
   echo

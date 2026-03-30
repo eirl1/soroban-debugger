@@ -13,7 +13,7 @@
 #   test-vscode Run VS Code extension tests
 #   ci-local    Run all practical gates developers must satisfy before pushing
 
-.PHONY: all build fmt lint lint-strict hooks-install hooks-check test-rust test-vscode ci-local clean regen-man check-man test-man-tmpdir
+.PHONY: all build fmt lint lint-strict hooks-install hooks-check test-rust test-rust-sandbox test-rust-network test-vscode ci-local clean regen-man check-man test-man-tmpdir
 
 all: build
 
@@ -37,7 +37,13 @@ hooks-check:
 	pre-commit run --all-files
 
 test-rust:
-	cargo test
+	cargo test --workspace --features network-tests
+
+test-rust-sandbox:
+	cargo test --workspace
+
+test-rust-network:
+	cargo test --workspace --features network-tests
 
 test-vscode:
 	cd extensions/vscode && npm install && npm run test
@@ -69,7 +75,7 @@ ci-local: fmt lint test-rust test-vscode check-man
 
 # Sandbox-safe local gate for restricted environments.
 # Runs deterministic checks and explicitly reports skipped network/temp-dependent gates.
-ci-sandbox:
+ci-sandbox: fmt lint test-rust-sandbox check-man
 	@bash run_local_ci.sh --sandbox
 
 clean:

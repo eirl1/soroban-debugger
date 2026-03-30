@@ -47,6 +47,7 @@ fn connect_with_retry(port: u16) -> Result<TcpStream, std::io::Error> {
 }
 
 #[test]
+#[cfg(feature = "network-tests")]
 fn test_heartbeat_negotiation() {
     let port = get_free_port();
     let token = "test-token";
@@ -78,6 +79,7 @@ fn test_heartbeat_negotiation() {
 }
 
 #[test]
+#[cfg(feature = "network-tests")]
 fn test_server_sends_heartbeats() {
     let port = get_free_port();
     let token = "test-token";
@@ -119,6 +121,7 @@ fn test_server_sends_heartbeats() {
 }
 
 #[test]
+#[cfg(feature = "network-tests")]
 fn test_idle_timeout_disconnects_client() {
     let port = get_free_port();
     let token = "test-token";

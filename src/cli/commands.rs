@@ -519,6 +519,8 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             token: args.token,
             tls_cert: args.tls_cert,
             tls_key: args.tls_key,
+            repeat: args.repeat,
+            storage_filter: args.storage_filter,
         });
     }
 
@@ -530,6 +532,9 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
                 token: args.token.clone(),
                 contract: args.contract.clone(),
                 function: args.function.clone(),
+                tls_cert: args.tls_cert.clone(),
+                tls_key: args.tls_key.clone(),
+                tls_ca: None, // Default in RunArgs -> RemoteArgs conversion
                 args: args.args.clone(),
             },
             verbosity,

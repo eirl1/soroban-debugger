@@ -7,29 +7,6 @@ pub type PluginResult<T> = Result<T, PluginError>;
 /// Errors that can occur during plugin operations
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PluginError {
-    /// Plugin initialization failed
-    #[error("Plugin initialization failed: {0}")]
-    InitializationFailed(String),
-
-    /// Plugin execution failed
-    #[error("Plugin execution failed: {0}")]
-    ExecutionFailed(String),
-
-    /// Plugin not found
-    #[error("Plugin not found: {0}")]
-    NotFound(String),
-
-    /// Invalid plugin
-    #[error("Invalid plugin: {0}")]
-    Invalid(String),
-
-    /// Version mismatch
-    #[error("Version mismatch: required {required}, found {found}")]
-    VersionMismatch { required: String, found: String },
-
-    /// Dependency error
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum PluginError {
     #[error("Plugin initialization failed: {0}")]
     InitializationFailed(String),
 

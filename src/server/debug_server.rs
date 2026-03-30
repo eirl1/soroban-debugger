@@ -191,7 +191,7 @@ impl DebugServer {
 
         let mut heartbeat_interval = None;
         let mut idle_timeout = None;
-        let mut heartbeat_timer = None;
+        let mut _heartbeat_timer = None;
 
         loop {
             let next_message = if let Some(timeout) = idle_timeout {
@@ -276,7 +276,7 @@ impl DebugServer {
                             info!("Negotiated heartbeat interval: {}ms", interval);
                             let tx_heartbeat = tx_out.clone();
                             let interval_ms = interval as u64;
-                            heartbeat_timer = Some(tokio::spawn(async move {
+                            _heartbeat_timer = Some(tokio::spawn(async move {
                                 let mut interval_timer =
                                     tokio::time::interval(std::time::Duration::from_millis(
                                         interval_ms,
@@ -472,98 +472,89 @@ impl DebugServer {
                     },
                 },
                 DebugRequest::Execute { function, args } => {
-                    if let Some(count) = self.repeat_count {
-                        if count > 1 {
-                            if let Some(wasm) = &self.contract_wasm {
-                                let breakpoints = self.engine.as_ref().map(|e| e.breakpoints().list().into_iter().map(|b| b.function).collect()).unwrap_or_default();
-                                let initial_storage = self.engine.as_ref().and_then(|e| e.executor().get_storage_snapshot().ok()).and_then(|s| serde_json::to_string(&s).ok());
-                                let runner = crate::repeat::RepeatRunner::new(wasm.clone(), breakpoints, initial_storage);
-                                match runner.run(&function, args.as_deref(), count) {
-                                    Ok(stats) => {
-                                        let output = format!("--- Repeat Execution ({} runs) ---\n\nDuration:\n  Min: {:.2}ms, Max: {:.2}ms, Avg: {:.2}ms\n\nCPU Instructions:\n  Min: {}, Max: {}, Avg: {}\n\nMemory (bytes):\n  Min: {}, Max: {}, Avg: {}\n\nResults: {}", 
-                                            count, 
-                                            stats.min_duration.as_secs_f64()*1000.0, stats.max_duration.as_secs_f64()*1000.0, stats.avg_duration.as_secs_f64()*1000.0,
-                                            stats.min_cpu, stats.max_cpu, stats.avg_cpu,
-                                            stats.min_memory, stats.max_memory, stats.avg_memory,
-                                            if stats.inconsistent_results { "INCONSISTENT" } else { "CONSISTENT" }
-                                        );
-                                        return Ok(DebugResponse::ExecutionResult {
-                                            success: true,
-                                            output,
-                                            error: None,
-                                            paused: false,
-                                            completed: true,
-                                            source_location: None,
-                                        });
+                    if let Some(count) = self.repeat_count.filter(|&c| c > 1) {
+                        if let Some(wasm) = &self.contract_wasm {
+                            let breakpoints = self.engine.as_ref().map(|e| e.breakpoints().list()).unwrap_or_default();
+                            let initial_storage = self.engine.as_ref().and_then(|e| e.executor().get_storage_snapshot().ok()).and_then(|s| serde_json::to_string(&s).ok());
+                            let runner = crate::repeat::RepeatRunner::new(wasm.clone(), breakpoints, initial_storage);
+                            match runner.run(&function, args.as_deref(), count) {
+                                Ok(stats) => {
+                                    let output = format!(
+                                        "--- Repeat Execution ({} runs) ---\n\nDuration:\n  Min: {:.2}ms, Max: {:.2}ms, Avg: {:.2}ms\n\nCPU Instructions:\n  Min: {}, Max: {}, Avg: {}\n\nMemory (bytes):\n  Min: {}, Max: {}, Avg: {}\n\nResults: {}", 
+                                        count, 
+                                        stats.min_duration.as_secs_f64()*1000.0, stats.max_duration.as_secs_f64()*1000.0, stats.avg_duration.as_secs_f64()*1000.0,
+                                        stats.min_cpu, stats.max_cpu, stats.avg_cpu,
+                                        stats.min_memory, stats.max_memory, stats.avg_memory,
+                                        if stats.inconsistent_results { "INCONSISTENT" } else { "CONSISTENT" }
+                                    );
+                                    DebugResponse::ExecutionResult {
+                                        success: true,
+                                        output,
+                                        error: None,
+                                        paused: false,
+                                        completed: true,
+                                        source_location: None,
                                     }
-                                    Err(e) => return Ok(DebugResponse::Error { message: e.to_string() }),
+                                }
+                                Err(e) => DebugResponse::Error { message: e.to_string() },
+                            }
+                        } else {
+                            DebugResponse::Error { message: "No contract loaded for repeat execution".to_string() }
+                        }
+                    } else {
+                        match self.engine.as_mut() {
+                            Some(engine) => {
+                                if engine.breakpoints().should_break(&function) {
+                                    match current_storage(engine) {
+                                        Ok(storage) => match engine.breakpoints_mut().on_hit(
+                                            &function,
+                                            &storage,
+                                            args.as_deref(),
+                                        ) {
+                                            Ok(Some(hit)) => {
+                                                for message in hit.log_messages {
+                                                    println!("{message}");
+                                                }
+                                                if hit.should_pause {
+                                                    engine.prepare_breakpoint_stop(&function, args.as_deref());
+                                                    self.pending_execution = Some(PendingExecution { function: function.clone(), args: args.clone() });
+                                                    DebugResponse::ExecutionResult {
+                                                        success: true,
+                                                        output: "Paused at function breakpoint".to_string(),
+                                                        error: None,
+                                                        paused: true,
+                                                        completed: false,
+                                                        source_location: engine.current_source_location().map(Into::into),
+                                                    }
+                                                } else {
+                                                    is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                    let resp = execute_without_breakpoints(engine, &function, args);
+                                                    is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                    resp
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                let resp = execute_without_breakpoints(engine, &function, args);
+                                                is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                resp
+                                            }
+                                            Err(e) => DebugResponse::Error { message: e.to_string() },
+                                        },
+                                        Err(e) => DebugResponse::Error { message: e.to_string() },
+                                    }
+                                } else {
+                                    is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    let resp = execute_without_breakpoints(engine, &function, args);
+                                    is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    resp
                                 }
                             }
-                        }
-                    }
-
-                    match self.engine.as_mut() {
-                    Some(engine) if engine.breakpoints().should_break(&function) => {
-                        match current_storage(engine) {
-                            Ok(storage) => match engine.breakpoints_mut().on_hit(
-                                &function,
-                                &storage,
-                                args.as_deref(),
-                            ) {
-                                Ok(Some(hit)) => {
-                                    for message in hit.log_messages {
-                                        println!("{message}");
-                                    }
-
-                                    if hit.should_pause {
-                                        engine.prepare_breakpoint_stop(&function, args.as_deref());
-                                        self.pending_execution =
-                                            Some(PendingExecution { function, args });
-                                        DebugResponse::ExecutionResult {
-                                            success: true,
-                                            output: String::new(),
-                                            error: None,
-                                            paused: true,
-                                            completed: false,
-                                            source_location: None,
-                                        }
-                                    } else {
-                                        {
-                                            is_executing
-                                                .store(true, std::sync::atomic::Ordering::SeqCst);
-                                            let r = execute_without_breakpoints(
-                                                engine, &function, args,
-                                            );
-                                            is_executing
-                                                .store(false, std::sync::atomic::Ordering::SeqCst);
-                                            r
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    let r = execute_without_breakpoints(engine, &function, args);
-                                    is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
-                                    r
-                                }
-                                Err(e) => DebugResponse::Error {
-                                    message: e.to_string(),
-                                },
-                            },
-                            Err(e) => DebugResponse::Error {
-                                message: e.to_string(),
+                            None => DebugResponse::Error {
+                                message: "No contract engine initialized".to_string(),
                             },
                         }
                     }
-                    Some(engine) => {
-                        is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
-                        let r = execute_without_breakpoints(engine, &function, args);
-                        is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
-                        r
-                    }
-                    None => DebugResponse::Error {
-                        message: "No contract loaded".to_string(),
-                    },
                 },
                 DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
@@ -582,7 +573,7 @@ impl DebugServer {
                                 paused: engine.is_paused(),
                                 current_function,
                                 step_count,
-                                source_location: None,
+                                source_location: engine.current_source_location().map(Into::into),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -610,7 +601,7 @@ impl DebugServer {
                                 paused: engine.is_paused(),
                                 current_function,
                                 step_count,
-                                source_location: None,
+                                source_location: engine.current_source_location().map(Into::into),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -650,7 +641,7 @@ impl DebugServer {
                                     paused: false,
                                     current_function,
                                     step_count,
-                                    source_location: None,
+                                    source_location: engine.current_source_location().map(Into::into),
                                 },
                                 Err(e) => DebugResponse::Error {
                                     message: e.to_string(),
@@ -673,7 +664,7 @@ impl DebugServer {
                                         paused: engine.is_paused(),
                                         current_function,
                                         step_count,
-                                        source_location: None,
+                                        source_location: engine.current_source_location().map(Into::into),
                                     }
                                 }
                                 Err(e) => DebugResponse::Error {
@@ -724,14 +715,14 @@ impl DebugServer {
                                     output: Some(output),
                                     error: None,
                                     paused: false,
-                                    source_location: None,
+                                    source_location: engine.current_source_location().map(Into::into),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
                                     output: None,
                                     error: Some(e.to_string()),
                                     paused: false,
-                                    source_location: None,
+                                    source_location: engine.current_source_location().map(Into::into),
                                 },
                             }
                         } else {
@@ -741,14 +732,14 @@ impl DebugServer {
                                     output: None,
                                     error: None,
                                     paused: engine.is_paused(),
-                                    source_location: None,
+                                    source_location: engine.current_source_location().map(Into::into),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
                                     output: None,
                                     error: Some(e.to_string()),
                                     paused: engine.is_paused(),
-                                    source_location: None,
+                                    source_location: engine.current_source_location().map(Into::into),
                                 },
                             }
                         }
@@ -779,7 +770,7 @@ impl DebugServer {
                                 step_count: state.step_count() as u64,
                                 paused: engine.is_paused(),
                                 call_stack,
-                                source_location: None,
+                                source_location: engine.current_source_location().map(Into::into),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -1074,7 +1065,7 @@ fn execute_without_breakpoints(
             error: None,
             paused: engine.is_paused(),
             completed: true,
-            source_location: None,
+            source_location: engine.current_source_location().map(Into::into),
         },
         Err(e) => DebugResponse::ExecutionResult {
             success: false,
@@ -1082,7 +1073,7 @@ fn execute_without_breakpoints(
             error: Some(e.to_string()),
             paused: false,
             completed: true,
-            source_location: None,
+            source_location: engine.current_source_location().map(Into::into),
         },
     }
 }
@@ -1132,11 +1123,6 @@ fn summarize_request(request: &DebugRequest) -> String {
 }
 
 async fn setup_signal_handlers(shutdown: Arc<Notify>) {
-    #[cfg(unix)]
-    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
-
-    #[cfg(not(unix))]
-    let ctrl_c = tokio::signal::ctrl_c();
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
 
     #[cfg(unix)]
