@@ -72,7 +72,8 @@ impl DebuggerEngine {
             Ok(()) => {
                 self.source_map = Some(source_map);
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to load source map");
                 self.source_map = None;
             }
         }
