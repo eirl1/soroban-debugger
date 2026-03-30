@@ -1,4 +1,4 @@
-use crate::debugger::breakpoint::BreakpointManager;
+use crate::debugger::breakpoint::{BreakpointManager, ConditionEvaluator};
 use crate::debugger::instruction_pointer::StepMode;
 use crate::debugger::source_map::{SourceLocation, SourceMap};
 use crate::debugger::state::DebugState;
@@ -8,6 +8,7 @@ use crate::runtime::executor::ContractExecutor;
 use crate::runtime::instruction::Instruction;
 use crate::runtime::instrumentation::Instrumenter;
 use crate::Result;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -26,6 +27,95 @@ pub struct DebuggerEngine {
     source_map: Option<SourceMap>,
     paused: bool,
     instruction_debug_enabled: bool,
+}
+
+struct EngineConditionEvaluator {
+    storage: HashMap<String, String>,
+}
+
+impl EngineConditionEvaluator {
+    fn new(storage: HashMap<String, String>) -> Self {
+        Self { storage }
+    }
+
+    fn parse_condition<'a>(&self, condition: &'a str) -> crate::Result<(&'a str, &'a str, &'a str)> {
+        let condition = condition.trim();
+        let (var, op, value) = if let Some(pos) = condition.find(">=") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), ">=", rest[2..].trim())
+        } else if let Some(pos) = condition.find("<=") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "<=", rest[2..].trim())
+        } else if let Some(pos) = condition.find("==") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "==", rest[2..].trim())
+        } else if let Some(pos) = condition.find("!=") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "!=", rest[2..].trim())
+        } else if let Some(pos) = condition.find('>') {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), ">", rest[1..].trim())
+        } else if let Some(pos) = condition.find('<') {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "<", rest[1..].trim())
+        } else {
+            return Err(crate::DebuggerError::BreakpointError(format!(
+                "No operator found in condition: {}",
+                condition
+            ))
+            .into());
+        };
+
+        Ok((var, op, value))
+    }
+
+    fn normalize_value(value: &str) -> &str {
+        value.trim_matches('"').trim_matches('\'')
+    }
+}
+
+impl ConditionEvaluator for EngineConditionEvaluator {
+    fn evaluate(&self, condition: &str) -> crate::Result<bool> {
+        let (var, op, value_str) = self.parse_condition(condition)?;
+        let actual = self
+            .storage
+            .get(var)
+            .map(String::as_str)
+            .unwrap_or_default()
+            .trim();
+        let actual = Self::normalize_value(actual);
+        let expected = Self::normalize_value(value_str);
+
+        if let (Ok(lhs), Ok(rhs)) = (actual.parse::<f64>(), expected.parse::<f64>()) {
+            return Ok(match op {
+                "==" => lhs == rhs,
+                "!=" => lhs != rhs,
+                ">" => lhs > rhs,
+                "<" => lhs < rhs,
+                ">=" => lhs >= rhs,
+                "<=" => lhs <= rhs,
+                _ => false,
+            });
+        }
+
+        Ok(match op {
+            "==" => actual == expected,
+            "!=" => actual != expected,
+            ">" => actual > expected,
+            "<" => actual < expected,
+            ">=" => actual >= expected,
+            "<=" => actual <= expected,
+            _ => false,
+        })
+    }
+
+    fn interpolate_log(&self, template: &str) -> crate::Result<String> {
+        let mut rendered = template.to_string();
+        for (key, value) in &self.storage {
+            rendered = rendered.replace(&format!("{{{}}}", key), value);
+        }
+        Ok(rendered)
+    }
 }
 
 impl DebuggerEngine {
@@ -53,6 +143,7 @@ impl DebuggerEngine {
             instrumenter: Instrumenter::new(),
             source_map: None,
             paused: false,
+            ) -> Result<String> {
             instruction_debug_enabled: false,
         }
     }
@@ -178,6 +269,22 @@ impl DebuggerEngine {
             &mut plugin_ctx,
         );
 
+        if check_breakpoints {
+            let storage = self.executor.get_storage_snapshot().unwrap_or_default();
+            let evaluator = EngineConditionEvaluator::new(storage);
+            let (should_pause, log_output) = self
+                .breakpoints_mut()
+                .should_break_with_context(function, &evaluator)?;
+
+            if let Some(message) = log_output {
+                println!("{message}");
+            }
+
+            if should_pause {
+                let condition = self
+                    .breakpoints()
+                    .get_breakpoint(function)
+                    .and_then(|bp| bp.condition.clone());
         let (step_count, current_args) = self
             .state
             .lock()
@@ -370,30 +477,17 @@ impl DebuggerEngine {
         } else {
             false
         };
-        self.paused = stepped;
-        Ok(stepped)
-    }
+        crate::plugin::registry::dispatch_global_event(
+            &ExecutionEvent::AfterFunctionCall {
+                function: function.to_string(),
+                result: event_result,
+                duration,
+            },
+            &mut plugin_ctx,
+        );
 
-    /// Step to next basic block.
-    pub fn step_block(&mut self) -> Result<bool> {
-        if !self.instruction_debug_enabled {
-            return Err(miette::miette!("Instruction debugging not enabled"));
-        }
-
-        let stepped = if let Ok(mut state) = self.state.lock() {
-            self.stepper.step_block(&mut state)
-        } else {
-            false
-        };
-        self.paused = stepped;
-        Ok(stepped)
-    }
-
-    /// Step backwards to previous instruction.
-    pub fn step_back(&mut self) -> Result<bool> {
-        if !self.instruction_debug_enabled {
-            return Err(miette::miette!("Instruction debugging not enabled"));
-        }
+        if let Err(ref e) = result {
+            tracing::error!("Execution failed: {}", e);
 
         let stepped = if let Ok(mut state) = self.state.lock() {
             self.stepper.step_back(&mut state)
