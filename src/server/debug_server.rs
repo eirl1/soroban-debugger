@@ -876,34 +876,41 @@ impl DebugServer {
                     },
                 },
                 DebugRequest::Inspect => match self.engine.as_ref() {
-                    Some(engine) => match engine.state().lock() {
-                        Ok(state) => {
-                            let call_stack = state
-                                .call_stack()
-                                .get_stack()
-                                .iter()
-                                .map(|frame| {
-                                    let suffix = frame
-                                        .contract_id
-                                        .as_ref()
-                                        .map(|id| format!(" [{}]", id))
-                                        .unwrap_or_default();
-                                    format!("{}{}", frame.function, suffix)
-                                })
-                                .collect();
-                            DebugResponse::InspectionResult {
-                                function: state.current_function().map(|s| s.to_string()),
-                                args: state.current_args().map(|s| s.to_string()),
-                                step_count: state.step_count() as u64,
-                                paused: engine.is_paused(),
-                                call_stack,
-                                source_location: engine.current_source_location().map(Into::into),
+                    Some(engine) => {
+                        match engine.state().lock() {
+                            Ok(state) => {
+                                let call_stack = state
+                                    .call_stack()
+                                    .get_stack()
+                                    .iter()
+                                    .map(|frame| {
+                                        let suffix = frame
+                                            .contract_id
+                                            .as_ref()
+                                            .map(|id| format!(" [{}]", id))
+                                            .unwrap_or_default();
+                                        format!("{}{}", frame.function, suffix)
+                                    })
+                                    .collect();
+                                let function = state.current_function().map(|s| s.to_string());
+                                let args = state.current_args().map(|s| s.to_string());
+                                let step_count = state.step_count() as u64;
+                                drop(state);
+
+                                DebugResponse::InspectionResult {
+                                    function,
+                                    args,
+                                    step_count,
+                                    paused: engine.is_paused(),
+                                    call_stack,
+                                    source_location: engine.current_source_location().map(Into::into),
+                                }
                             }
+                            Err(e) => DebugResponse::Error {
+                                message: format!("Failed to acquire state lock: {}", e),
+                            },
                         }
-                        Err(e) => DebugResponse::Error {
-                            message: format!("Failed to acquire state lock: {}", e),
-                        },
-                    },
+                    }
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
