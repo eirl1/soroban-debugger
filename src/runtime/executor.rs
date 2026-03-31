@@ -15,21 +15,18 @@ use crate::server::protocol::{DynamicTraceEvent, DynamicTraceEventKind};
 use crate::utils::arguments::ArgumentParser;
 use crate::{DebuggerError, Result};
 
-use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::{json, Value};
-use soroban_env_host::xdr::ScVal;
-use soroban_env_host::{DiagnosticLevel, Host, TryFromVal};
 use soroban_env_host::Host;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::testutils::Ledger as _;
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, Val};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 // â”€â”€ re-exports so callers never need to import sub-modules directly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 pub use crate::runtime::mocking::MockCallLogEntry as MockCallEntry;
@@ -520,6 +517,7 @@ impl ContractExecutor {
             .collect())
     }
 
+    #[allow(dead_code)]
     fn parse_args(&self, function: &str, args_json: &str) -> Result<Vec<Val>> {
         let normalized_args_json = self
             .normalize_args_for_function_signature(function, args_json)
@@ -535,6 +533,7 @@ impl ContractExecutor {
             })
     }
 
+    #[allow(dead_code)]
     fn normalize_args_for_function_signature(
         &self,
         function: &str,
