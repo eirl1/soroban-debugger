@@ -152,55 +152,76 @@ impl Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
-    /// Run a contract function with the debugger
+    // --- Run and Debug ---
+    /// Execute a contract function with the debugger
+    #[command(subcommand_help_heading = "Run and Debug")]
     Run(RunArgs),
 
     /// Start an interactive debugging session
+    #[command(subcommand_help_heading = "Run and Debug")]
     Interactive(InteractiveArgs),
 
     /// Start an interactive REPL for contract exploration
+    #[command(subcommand_help_heading = "Run and Debug")]
     Repl(ReplArgs),
 
     /// Launch the full-screen TUI dashboard
+    #[command(subcommand_help_heading = "Run and Debug")]
     Tui(TuiArgs),
 
+    /// Run a multi-step scenario from a TOML file
+    #[command(subcommand_help_heading = "Run and Debug")]
+    Scenario(ScenarioArgs),
+
+    /// Replay execution from a previously exported trace file
+    #[command(subcommand_help_heading = "Run and Debug")]
+    Replay(ReplayArgs),
+
+    // --- Analyze and Compare ---
     /// Inspect contract information without executing
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Inspect(InspectArgs),
 
     /// Check compatibility between two contract versions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     UpgradeCheck(UpgradeCheckArgs),
 
-    /// Generate shell completion scripts
-    Completions(CompletionsArgs),
-
     /// Analyze contract and generate gas optimization suggestions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Optimize(OptimizeArgs),
 
     /// Profile a single function execution and print hotspots + suggestions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Profile(ProfileArgs),
 
     /// Compare two execution trace JSON files side-by-side
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Compare(CompareArgs),
 
-    /// Replay execution from a previously exported trace file
-    Replay(ReplayArgs),
-
     /// Run symbolic execution to explore contract input space
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Symbolic(SymbolicArgs),
 
+    /// Analyze contract for security vulnerabilities
+    #[command(subcommand_help_heading = "Analyze and Compare")]
+    Analyze(AnalyzeArgs),
+
+    // --- Remote and Server ---
     /// Start debug server for remote connections
+    #[command(subcommand_help_heading = "Remote and Server")]
     Server(ServerArgs),
 
     /// Connect to remote debug server
+    #[command(subcommand_help_heading = "Remote and Server")]
     Remote(RemoteArgs),
 
-    /// Analyze contract for security vulnerabilities
-    Analyze(AnalyzeArgs),
-
-    /// Run a multi-step scenario from a TOML file
-    Scenario(ScenarioArgs),
+    // --- Developer Utilities ---
+    /// Generate shell completion scripts
+    #[command(subcommand_help_heading = "Developer Utilities")]
+    Completions(CompletionsArgs),
 
     /// Prune or compact run history according to a retention policy
+    #[command(subcommand_help_heading = "Developer Utilities")]
     HistoryPrune(HistoryPruneArgs),
 
     /// Plugin-provided subcommand (loaded at runtime)
@@ -1109,6 +1130,55 @@ pub struct RemoteArgs {
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
+
+    /// Timeout in milliseconds for the initial TCP connection to the remote server.
+    ///
+    /// Use this when the server is on a slow or restricted network and the default
+    /// connect attempt feels hung or fails unpredictably.  Distinct from
+    /// --timeout-ms, which governs individual request/response round-trips after
+    /// the connection is already established.
+    ///
+    /// Default: 10 000 ms (10 seconds).
+    #[arg(long, value_name = "MS", default_value = "10000", env = "SOROBAN_DEBUG_CONNECT_TIMEOUT_MS")]
+    pub connect_timeout_ms: u64,
+
+    /// Per-request timeout in milliseconds for regular operations (execute, storage, inspect).
+    ///
+    /// Default: 30 000 ms (30 seconds).
+    #[arg(long, value_name = "MS", default_value = "30000", env = "SOROBAN_DEBUG_REQUEST_TIMEOUT_MS")]
+    pub timeout_ms: u64,
+
+    /// Per-request timeout in milliseconds specifically for Inspect calls.
+    ///
+    /// Inspect fetches execution state metadata and can be slower than a simple ping.
+    /// Defaults to --timeout-ms when not provided.
+    #[arg(long, value_name = "MS", env = "SOROBAN_DEBUG_INSPECT_TIMEOUT_MS")]
+    pub inspect_timeout_ms: Option<u64>,
+
+    /// Per-request timeout in milliseconds specifically for GetStorage calls.
+    ///
+    /// Storage fetches can be large; set this higher than --timeout-ms for contracts
+    /// with many storage keys.  Defaults to --timeout-ms when not provided.
+    #[arg(long, value_name = "MS", env = "SOROBAN_DEBUG_STORAGE_TIMEOUT_MS")]
+    pub storage_timeout_ms: Option<u64>,
+
+    /// Maximum number of retry attempts for idempotent requests (ping, inspect, storage).
+    ///
+    /// Default: 3.
+    #[arg(long, value_name = "N", default_value = "3")]
+    pub retry_attempts: usize,
+
+    /// Base delay in milliseconds between retry attempts (exponential back-off).
+    ///
+    /// Default: 200 ms.
+    #[arg(long, value_name = "MS", default_value = "200")]
+    pub retry_base_delay_ms: u64,
+
+    /// Maximum delay in milliseconds between retry attempts.
+    ///
+    /// Default: 2 000 ms.
+    #[arg(long, value_name = "MS", default_value = "2000")]
+    pub retry_max_delay_ms: u64,
 
     /// Remote operation to perform (default: execute or ping)
     #[command(subcommand)]

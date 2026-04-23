@@ -1,0 +1,12 @@
+# Example Suppressions File for Soroban Debugger Analyzer
+
+[[suppressions]]
+rule_id = "missing-auth"
+contract_path = "contracts/test"
+location = "Dynamic trace"
+reason = "Auth is bypassed explicitly in this mock code"
+
+[[suppressions]]
+rule_id = "hardcoded-address"
+contract_path = "contracts/fixture"
+reason = "Expected fixture data"

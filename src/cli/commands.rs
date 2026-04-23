@@ -79,6 +79,7 @@ struct AnalyzeCommandOutput {
     findings: Vec<crate::analyzer::security::SecurityFinding>,
     dynamic_analysis: Option<DynamicAnalysisMetadata>,
     warnings: Vec<String>,
+    suppressed_count: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -235,10 +236,20 @@ fn render_security_report(output: &AnalyzeCommandOutput) -> String {
 
     if output.findings.is_empty() {
         lines.push("No security findings detected.".to_string());
+        if output.suppressed_count > 0 {
+            lines.push(format!(
+                "({} findings were suppressed)",
+                output.suppressed_count
+            ));
+        }
         return lines.join("\n");
     }
 
-    lines.push(format!("Findings: {}", output.findings.len()));
+    lines.push(format!(
+        "Findings: {} ({} suppressed)",
+        output.findings.len(),
+        output.suppressed_count
+    ));
     for (idx, finding) in output.findings.iter().enumerate() {
         lines.push(format!(
             "  {}. [{:?}] {} at {}",
@@ -540,6 +551,13 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
                 tls_key: args.tls_key.clone(),
                 tls_ca: None,
                 args: args.args.clone(),
+                connect_timeout_ms: 10000,
+                timeout_ms: 30000,
+                inspect_timeout_ms: None,
+                storage_timeout_ms: None,
+                retry_attempts: 3,
+                retry_base_delay_ms: 200,
+                retry_max_delay_ms: 2000,
                 action: None,
             },
             verbosity,
@@ -1295,7 +1313,10 @@ fn format_text_report(report: &CompatibilityReport) -> String {
     } else {
         "INCOMPATIBLE"
     };
-    out.push_str(&format!("Status: {}\n", status));
+    out.push_str(&format!(
+        "Status: {} (Classification: {})\n",
+        status, report.classification
+    ));
 
     out.push('\n');
     out.push_str(&format!(
@@ -1841,14 +1862,43 @@ pub fn server(args: ServerArgs) -> Result<()> {
 /// Connect to remote debug server
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Connecting to remote debugger at {}", args.remote));
+
+    // Build per-request timeouts, falling back to the general --timeout-ms for
+    // the specialised classes when the user did not set them explicitly.
+    let default_ms = args.timeout_ms;
+    let timeouts = crate::client::RemoteClientConfig::build_timeouts(
+        default_ms,
+        args.inspect_timeout_ms,
+        args.storage_timeout_ms,
+    );
+
     let config = crate::client::RemoteClientConfig {
+        connect_timeout: std::time::Duration::from_millis(args.connect_timeout_ms),
+        timeouts,
+        retry: crate::client::RetryPolicy {
+            max_attempts: args.retry_attempts,
+            base_delay: std::time::Duration::from_millis(args.retry_base_delay_ms),
+            max_delay: std::time::Duration::from_millis(args.retry_max_delay_ms),
+        },
         tls_cert: args.tls_cert.clone(),
         tls_key: args.tls_key.clone(),
         tls_ca: args.tls_ca.clone(),
         ..Default::default()
     };
+
     let mut client =
-        crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
+        crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config).map_err(|e| {
+            // Enrich connect-specific errors with a hint about --connect-timeout-ms so
+            // the user knows which knob to turn without having to read the docs first.
+            let msg = e.to_string();
+            if msg.contains("Request timed out") || msg.contains("timed out") || msg.contains("Connection refused") || msg.contains("Network/transport error") {
+                miette::miette!("{}\n\nHint: use --connect-timeout-ms <MS> (current: {}ms) to extend the initial TCP connect window, or set SOROBAN_DEBUG_CONNECT_TIMEOUT_MS. See docs/remote-troubleshooting.md for the full diagnostic matrix.",
+                    msg,
+                    args.connect_timeout_ms)
+            } else {
+                miette::miette!("{}", msg)
+            }
+        })?;
 
     if let Some(contract) = &args.contract {
         print_info(format!("Loading contract: {:?}", contract));
@@ -2047,6 +2097,7 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
     }
 
     let info = crate::utils::wasm::get_module_info(&bytes)?;
+    let artifact_metadata = crate::utils::wasm::extract_wasm_artifact_metadata(&bytes)?;
     if args.format == OutputFormat::Json {
         let exported_functions = if args.functions {
             Some(crate::utils::wasm::parse_function_signatures(&bytes)?)
@@ -2060,6 +2111,7 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
             "functions": info.function_count,
             "exports": info.export_count,
             "exported_functions": exported_functions,
+            "artifact_metadata": artifact_metadata,
         });
         let envelope = crate::output::VersionedOutput::success("inspect", result);
         println!(
@@ -2076,6 +2128,72 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
     println!("Types: {}", info.type_count);
     println!("Functions: {}", info.function_count);
     println!("Exports: {}", info.export_count);
+    println!("Artifact metadata:");
+    println!(
+        "  Build profile hint: {}",
+        artifact_metadata.build_profile_hint
+    );
+    println!(
+        "  Optimization hint: {}",
+        artifact_metadata.optimization_hint
+    );
+    println!(
+        "  Name section: {}",
+        if artifact_metadata.name_section_present {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    println!(
+        "  DWARF debug sections: {}",
+        if artifact_metadata.has_debug_sections {
+            if artifact_metadata.debug_sections.is_empty() {
+                "present".to_string()
+            } else {
+                format!(
+                    "present ({}, {} bytes)",
+                    artifact_metadata.debug_sections.join(", "),
+                    artifact_metadata.debug_section_bytes
+                )
+            }
+        } else {
+            "absent".to_string()
+        }
+    );
+    if let Some(module_name) = &artifact_metadata.module_name {
+        println!("  Module name: {}", module_name);
+    }
+    if !artifact_metadata.package_hints.is_empty() {
+        println!("  Package hints:");
+        for hint in &artifact_metadata.package_hints {
+            println!("    - {}", hint);
+        }
+    }
+    if !artifact_metadata.producers.is_empty() {
+        println!("  Producers:");
+        for field in &artifact_metadata.producers {
+            let values = field
+                .values
+                .iter()
+                .map(|value| {
+                    if value.version.is_empty() {
+                        value.name.clone()
+                    } else {
+                        format!("{} {}", value.name, value.version)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("    {}: {}", field.name, values);
+        }
+    }
+    if !artifact_metadata.heuristic_notes.is_empty() {
+        println!("  Notes:");
+        for note in &artifact_metadata.heuristic_notes {
+            println!("    - {}", note);
+        }
+    }
     if args.functions {
         let sigs = crate::utils::wasm::parse_function_signatures(&bytes)?;
         println!("Exported functions:");
@@ -2269,22 +2387,31 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
         }
     }
 
-    let analyzer = SecurityAnalyzer::new();
+    let mut analyzer = SecurityAnalyzer::new();
+    let config = crate::config::Config::load_or_default();
+    if let Some(supp_path) = config.output.suppressions_file {
+        if std::path::Path::new(&supp_path).exists() {
+            analyzer = analyzer.load_suppressions_from_file(&supp_path)?;
+        }
+    }
     let filter = crate::analyzer::security::AnalyzerFilter {
         enable_rules: args.enable_rule.clone(),
         disable_rules: args.disable_rule.clone(),
         min_severity: parse_min_severity(&args.min_severity)?,
     };
+    let contract_path = args.contract.to_string_lossy().to_string();
     let report = analyzer.analyze(
         &wasm_file.bytes,
         executor.as_ref(),
         trace_entries.as_deref(),
         &filter,
+        &contract_path,
     )?;
     let output = AnalyzeCommandOutput {
         findings: report.findings,
         dynamic_analysis,
         warnings,
+        suppressed_count: report.metadata.suppressed_count,
     };
 
     match args.format.to_lowercase().as_str() {

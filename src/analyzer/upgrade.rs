@@ -140,6 +140,24 @@ impl fmt::Display for NonBreakingChange {
     }
 }
 
+/// Defined taxonomy for upgrade stability evaluation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UpgradeClass {
+    Safe,
+    Caution,
+    Breaking,
+}
+
+impl fmt::Display for UpgradeClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UpgradeClass::Safe => write!(f, "Safe"),
+            UpgradeClass::Caution => write!(f, "Caution"),
+            UpgradeClass::Breaking => write!(f, "Breaking"),
+        }
+    }
+}
+
 /// Execution result comparison when --test-inputs is provided
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionDiff {
@@ -154,6 +172,7 @@ pub struct ExecutionDiff {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompatibilityReport {
     pub is_compatible: bool,
+    pub classification: UpgradeClass,
     pub old_wasm_path: String,
     pub new_wasm_path: String,
     pub breaking_changes: Vec<BreakingChange>,
@@ -183,8 +202,17 @@ impl UpgradeAnalyzer {
         let has_execution_mismatches = execution_diffs.iter().any(|d| !d.outputs_match);
         let is_compatible = breaking_changes.is_empty() && !has_execution_mismatches;
 
+        let classification = if !breaking_changes.is_empty() || has_execution_mismatches {
+            UpgradeClass::Breaking
+        } else if !non_breaking_changes.is_empty() {
+            UpgradeClass::Caution
+        } else {
+            UpgradeClass::Safe
+        };
+
         Ok(CompatibilityReport {
             is_compatible,
+            classification,
             old_wasm_path: old_path.to_string(),
             new_wasm_path: new_path.to_string(),
             breaking_changes,

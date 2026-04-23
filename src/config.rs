@@ -38,6 +38,9 @@ pub struct OutputConfig {
     /// Show events by default
     #[serde(default)]
     pub show_events: Option<bool>,
+    /// Path to the analyzer suppressions TOML file
+    #[serde(default)]
+    pub suppressions_file: Option<String>,
 }
 
 impl Config {

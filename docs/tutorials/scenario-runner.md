@@ -2,6 +2,8 @@
 
 The Soroban Debugger's scenario runner allows you to write integration-test-style scenarios for Soroban contracts directly in TOML — no Rust test code required. This tutorial will walk you through the complete TOML format, provide a worked example, and show you how to run scenarios and interpret the output.
 
+For practical recipes and reusable patterns, check out the [Scenario Cookbook](../scenario-cookbook.md).
+
 ## Overview
 
 The scenario runner executes a sequence of contract function calls defined in a TOML file, validating both return values and storage state at each step. This approach offers several advantages:

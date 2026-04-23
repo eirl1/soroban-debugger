@@ -53,6 +53,11 @@
           "type": "number",
           "default": 10000,
           "description": "Timeout (ms) to wait for the backend server to become reachable during launch."
+        },
+        "soroban-debugger.telemetry.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable opt-in telemetry for launch failures, handshake errors, and adapter crashes. No contract data or secrets are collected."
         }
       }
     },

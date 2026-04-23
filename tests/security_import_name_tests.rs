@@ -77,7 +77,7 @@ fn has_cross_contract_import_finding(wasm: &[u8]) -> bool {
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(wasm, None, None, &filter)
+        .analyze(wasm, None, None, &filter, "test_contract.wasm")
         .expect("analysis failed");
     report
         .findings
@@ -147,7 +147,7 @@ fn reentrancy_detection_handles_optional_function_metadata_with_depth() {
     ];
 
     let report = analyzer
-        .analyze(&wasm, None, Some(&trace), &AnalyzerFilter::default())
+        .analyze(&wasm, None, Some(&trace), &AnalyzerFilter::default(), "test_contract.wasm")
         .expect("analysis failed");
 
     assert!(report

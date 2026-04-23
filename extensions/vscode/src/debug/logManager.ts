@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as vscode_api from 'vscode';
 
 export enum LogLevel {
   Debug = 'DEBUG',
@@ -58,6 +59,7 @@ export class LogManager {
   private outputChannel: OutputChannelLike;
   private logFile: string;
   private maxLogSizeBytes = 10 * 1024 * 1024; // 10MB
+  private telemetryEnabled: boolean = false;
 
   constructor(context: ExtensionContextLike) {
     const vscode = loadVscodeModule();
@@ -72,6 +74,14 @@ export class LogManager {
     }
     this.logFile = path.join(context.globalStorageUri.fsPath, 'debug.log');
     this.ensureLogDirectory();
+    this.updateTelemetryStatus();
+  }
+
+  private updateTelemetryStatus(): void {
+    const vscode = loadVscodeModule() as any;
+    if (vscode?.workspace) {
+      this.telemetryEnabled = vscode.workspace.getConfiguration('soroban-debugger').get('telemetry.enabled', false);
+    }
   }
 
   private ensureLogDirectory(): void {
@@ -93,6 +103,20 @@ export class LogManager {
     const formatted = this.formatEntry(entry);
     this.outputChannel.appendLine(formatted);
     this.persistEntry(formatted);
+
+    if (this.telemetryEnabled && level === LogLevel.Error) {
+      this.sendTelemetry(entry);
+    }
+  }
+
+  private sendTelemetry(entry: LogEntry): void {
+    // In a real implementation, this would send to a telemetry endpoint.
+    // For now, we log that telemetry was "sent" to the output channel in debug mode.
+    const vscode = loadVscodeModule() as any;
+    if (vscode?.env?.sessionId) {
+      // Simulated telemetry submission
+      console.log(`[TELEMETRY] Sending failure signal: ${entry.phase} - ${entry.message.substring(0, 100)}`);
+    }
   }
 
   private formatEntry(entry: LogEntry): string {

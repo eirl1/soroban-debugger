@@ -13,6 +13,10 @@ A Visual Studio Code extension that integrates the Soroban smart contract debugg
 - 📝 **Detailed Logging**: Optional trace logging for debugging adapter interactions
 - ⚡ **Real-time Debugging**: Step through contract execution with next, step in, and step out
 
+## Privacy & Telemetry
+
+The extension includes **opt-in** failure telemetry to help us improve the tool. No contract data or secrets are ever collected. See [Telemetry Documentation](docs/telemetry.md) for details.
+
 ## Requirements
 
 - Visual Studio Code 1.75.0 or higher
@@ -438,6 +442,99 @@ The extension consists of three main components:
 - Consider using a minimal snapshot for testing
 - Disable trace logging if enabled
 
+---
+
+## Manifest Schema Validation
+
+`extensions/vscode/package.schema.json` provides an offline, strict JSON Schema (draft-07) that validates the shape of `package.json` for this extension.
+
+### Why this exists
+
+VS Code normally validates extension manifests against a network-fetched schema. In offline environments, CI sandboxes, or air-gapped machines that schema fetch silently fails, leaving `package.json` unvalidated. The local schema closes that gap: unknown top-level keys, mistyped settings, and malformed launch-config attribute trees are all rejected at authoring time rather than silently drifting.
+
+### What is validated
+
+| Area | Validated fields |
+|------|------------------|
+| **Top-level manifest** | `name`, `version` (semver), `engines.vscode`, `main`, `contributes` — unknown keys rejected |
+| **contributes.commands** | `command` and `title` required; unknown keys rejected |
+| **contributes.configuration** | `soroban-debugger.requestTimeoutMs` and `soroban-debugger.connectTimeoutMs` shape and types |
+| **contributes.debuggers** | `type` must be `"soroban"`; both `launch` and `attach` attribute trees validated |
+| **Launch config attributes** | All supported fields: `contractPath`, `entrypoint`, `args`, `port` (1–65535), `token`, `tlsCert`/`tlsKey`, `storageFilter`, `repeat`, `batchArgs`, `requestTimeoutMs`, `connectTimeoutMs`, `dryRun` |
+| **Attach config attributes** | `host`, `port`, and all shared optional fields |
+| **initialConfigurations / configurationSnippets** | `name`, `type: "soroban"`, `request: "launch" \| "attach"` required; unknown body keys rejected |
+
+### How to validate locally
+
+Using `ajv-cli`:
+
+```bash
+npm install -g ajv-cli
+
+# Validate package.json against the local schema
+ajv validate \
+  -s extensions/vscode/package.schema.json \
+  -d extensions/vscode/package.json \
+  --spec=draft7 \
+  --strict=false
+```
+
+A passing run prints:
+```
+extensions/vscode/package.json valid
+```
+
+Any violation prints the JSON path and error message, e.g.:
+```
+extensions/vscode/package.json invalid
+[
+  {
+    "instancePath": "/contributes/debuggers/0/type",
+    "message": "must be equal to constant"
+  }
+]
+```
+
+### Integrating into CI
+
+Add a validation step before the compile step in your CI pipeline:
+
+```yaml
+# .github/workflows/extension.yml (example)
+- name: Validate extension manifest schema
+  run: |
+    npm install -g ajv-cli
+    ajv validate \
+      -s extensions/vscode/package.schema.json \
+      -d extensions/vscode/package.json \
+      --spec=draft7 \
+      --strict=false
+```
+
+The `make ci-local` target already runs this check. For sandbox CI use `make ci-sandbox`, which skips network-dependent steps but still runs schema validation.
+
+### Updating the schema
+
+When you add a new launch/attach config field to `package.json`, you must also add it to `package.schema.json` or the manifest validation step will fail.
+
+| What you're adding | Where to add it in the schema |
+|-------------------|------------------------------|
+| New launch attribute | `definitions.launchConfig.properties.properties` |
+| New attach attribute | `definitions.attachConfig.properties.properties` |
+| New VS Code setting | `contributes.configuration.properties` |
+| New command | No schema change needed (commands validate `command`+`title` only) |
+
+Use the existing `$ref` helper definitions (`stringProp`, `boolProp`, `portProp`, `timeoutProp`, etc.) for common patterns to keep the schema consistent.
+
+### Constraints and known limitations
+
+- The schema is draft-07 to match the `$schema` declaration already in `package.json`.
+- `configurationAttributes.launch.properties` and `.attach.properties` use `additionalProperties: false` — any field not listed in `definitions.launchConfig` / `definitions.attachConfig` will cause a validation error.
+- The `anyDebugConfig` definition (used for `initialConfigurations` and snippet body objects) is also strict; keep it in sync when adding new fields.
+- The schema does not validate `contributes.debuggers[].program` or `runtime` against actual file paths — those are checked at runtime by VS Code.
+
+---
+
 ## Development
 
 ### Build and Test
@@ -468,19 +565,19 @@ make ci-local
 
 ```
 ├── src/
-│   ├── extension.ts          # Extension entry point
-│   ├── debug/
-│   │   └── adapter.ts        # VSCode debug adapter factory
-│   ├── dap/
-│   │   ├── adapter.ts        # DAP session implementation
-│   │   └── protocol.ts       # Protocol types and utilities
-│   └── cli/
-│       └── debuggerProcess.ts # CLI process wrapper
-│   ├── test/
-│   │   ├── runSmokeTest.ts   # Smoke test entrypoint
-│   │   ├── runDapE2E.ts      # DAP end-to-end entrypoint
-│   │   ├── runTest.ts        # Combined compatibility wrapper
-│   │   └── suites.ts         # Shared test suite helpers
+├── extension.ts          # Extension entry point
+├── debug/
+│   └── adapter.ts        # VSCode debug adapter factory
+├── dap/
+│   ├── adapter.ts        # DAP session implementation
+│   └── protocol.ts       # Protocol types and utilities
+└── cli/
+    └── debuggerProcess.ts # CLI process wrapper
+├── test/
+│   ├── runSmokeTest.ts   # Smoke test entrypoint
+│   ├── runDapE2E.ts      # DAP end-to-end entrypoint
+│   ├── runTest.ts        # Combined compatibility wrapper
+│   └── suites.ts         # Shared test suite helpers
 ├── package.json              # Extension manifest
 ├── tsconfig.json            # TypeScript configuration
 └── README.md                # This file

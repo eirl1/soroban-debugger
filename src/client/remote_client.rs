@@ -48,8 +48,9 @@ impl Default for RetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RemoteClientConfig {
+    pub connect_timeout: Duration,  // defaults to 10 seconds.
     pub timeouts: RequestTimeouts,
     pub retry: RetryPolicy,
     pub heartbeat_interval_ms: Option<u32>,
@@ -57,6 +58,36 @@ pub struct RemoteClientConfig {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub tls_ca: Option<PathBuf>,
+}
+
+impl Default for RemoteClientConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_millis(10_000),
+            timeouts: RequestTimeouts::default(),
+            retry: RetryPolicy::default(),
+            heartbeat_interval_ms: None,
+            idle_timeout_ms: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_ca: None,
+        }
+    }
+}
+
+impl RemoteClientConfig {
+    pub fn build_timeouts(
+        default_ms: u64,
+        inspect_ms: Option<u64>,
+        storage_ms: Option<u64>,
+    ) -> RequestTimeouts {
+        RequestTimeouts {
+            default: Duration::from_millis(default_ms),
+            ping: Duration::from_millis(2_000),
+            inspect: Duration::from_millis(inspect_ms.unwrap_or(default_ms)),
+            get_storage: Duration::from_millis(storage_ms.unwrap_or(default_ms)),
+        }
+    }
 }
 
 /// Remote client for connecting to a debug server
@@ -151,10 +182,53 @@ impl RemoteClient {
     }
 
     fn create_stream(addr: &str, config: &RemoteClientConfig) -> Result<RemoteStream> {
-        let tcp_stream = TcpStream::connect(addr).map_err(|e| {
-            DebuggerError::NetworkError(format!("Failed to connect to {}: {}", addr, e))
-        })?;
 
+        use std::net::ToSocketAddrs;
+        let socket_addr = addr
+            .to_socket_addrs()
+            .map_err(|e| {
+                DebuggerError::NetworkError(format!(
+                    "Failed to resolve address '{}': {}",
+                    addr, e
+                ))
+            })?
+            .next()
+            .ok_or_else(|| {
+                DebuggerError::NetworkError(format!(
+                    "No socket address resolved for '{}'",
+                    addr
+                ))
+            })?;
+ 
+        // ── TCP connect with configurable timeout ────────────────────────────
+        let tcp_stream =
+            TcpStream::connect_timeout(&socket_addr, config.connect_timeout).map_err(|e| {
+                let kind_hint = match e.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        format!(
+                            "connect timed out after {}ms — use --connect-timeout-ms to \
+                             extend the window",
+                            config.connect_timeout.as_millis()
+                        )
+                    }
+                    std::io::ErrorKind::ConnectionRefused => {
+                        "connection refused — verify the server is running and the port \
+                         is correct"
+                            .to_string()
+                    }
+                    std::io::ErrorKind::PermissionDenied => {
+                        "permission denied — loopback networking may be restricted in this \
+                         environment (sandbox/container); see docs/remote-troubleshooting.md"
+                            .to_string()
+                    }
+                    _ => format!("TCP connect error: {}", e),
+                };
+                DebuggerError::NetworkError(format!(
+                    "Failed to connect to '{}': {}",
+                    addr, kind_hint
+                ))
+            })?;
+ 
         if config.tls_cert.is_some() || config.tls_key.is_some() || config.tls_ca.is_some() {
             let mut root_store = RootCertStore::empty();
             if let Some(ref ca_path) = config.tls_ca {
@@ -174,7 +248,6 @@ impl RemoteClient {
                     })?;
                 }
             } else {
-                // Use native certs if no CA is provided
                 for cert in rustls_native_certs::load_native_certs().map_err(|e| {
                     DebuggerError::NetworkError(format!("Failed to load native certs: {}", e))
                 })? {
@@ -186,7 +259,7 @@ impl RemoteClient {
                     })?;
                 }
             }
-
+ 
             let client_config = if let (Some(ref cert_path), Some(ref key_path)) =
                 (&config.tls_cert, &config.tls_key)
             {
@@ -204,7 +277,7 @@ impl RemoteClient {
                     .into_iter()
                     .map(Certificate)
                     .collect();
-
+ 
                 let key_file = std::fs::File::open(key_path).map_err(|e| {
                     DebuggerError::FileError(format!(
                         "Failed to open client key {:?}: {}",
@@ -215,7 +288,7 @@ impl RemoteClient {
                 let keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader).map_err(|e| {
                     DebuggerError::FileError(format!("Failed to parse client key: {}", e))
                 })?;
-
+ 
                 if let Some(key) = keys.into_iter().next() {
                     ClientConfig::builder()
                         .with_safe_defaults()
@@ -239,17 +312,17 @@ impl RemoteClient {
                     .with_root_certificates(root_store)
                     .with_no_client_auth()
             };
-
+ 
             let host = addr.split(':').next().unwrap_or("localhost");
             let server_name = ServerName::try_from(host).map_err(|e| {
                 DebuggerError::NetworkError(format!("Invalid server name '{}': {}", host, e))
             })?;
-
+ 
             let conn = rustls::client::ClientConnection::new(Arc::new(client_config), server_name)
                 .map_err(|e| {
                     DebuggerError::NetworkError(format!("Failed to create TLS connection: {}", e))
                 })?;
-
+ 
             Ok(RemoteStream::Tls(Box::new(rustls::StreamOwned::new(
                 conn, tcp_stream,
             ))))
@@ -961,6 +1034,7 @@ impl Drop for RemoteClient {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,6 +1050,87 @@ mod tests {
         let err = RemoteClient::connect("127.0.0.1:1", None).unwrap_err();
         assert!(err.to_string().contains("Network/transport error"));
     }
+
+     #[test]
+    fn connect_timeout_is_respected() {
+        if TcpListener::bind("127.0.0.1:0").is_err() {
+            eprintln!("Skipping connect_timeout_is_respected: loopback restricted");
+            return;
+        }
+ 
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+ 
+        // accept but never send a byte  simulates a silent firewall / slow
+        // proxy that completes TCP but stalls the application protocol.
+        std::thread::spawn(move || {
+            if let Ok((_stream, _)) = listener.accept() {
+                // this keeps the socket open long enough that the client has to time out.
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+ 
+        let config = RemoteClientConfig {
+            // 1 ms connect timeout — fast on loopback since the OS TCP handshake
+            // completes immediately; the actual timeout fires during the protocol
+            // handshake read  uses  50 ms default window.
+            connect_timeout: Duration::from_millis(1),
+            timeouts: RequestTimeouts {
+                default: Duration::from_millis(50),
+                ping: Duration::from_millis(50),
+                inspect: Duration::from_millis(50),
+                get_storage: Duration::from_millis(50),
+            },
+            retry: RetryPolicy {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+            },
+            ..Default::default()
+        };
+ 
+        let err = RemoteClient::connect_with_config(&addr.to_string(), None, config).unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("Request timed out")
+                || msg.contains("timed out")
+                || msg.contains("Network/transport error")
+                || msg.contains("connection closed by peer"),
+            "Expected a timeout/network error, got: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("Authentication") && !msg.contains("Incompatible"),
+            "Error should not appear as auth/protocol failure: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn connect_timeout_error_is_network_category() {
+        // point at a port that is almost certainly not listening.
+        let err = RemoteClient::connect_with_config(
+            "127.0.0.1:19999",
+            None,
+            RemoteClientConfig {
+                connect_timeout: Duration::from_millis(50),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+ 
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Network/transport error")
+                || msg.contains("timed out")
+                || msg.contains("connection refused")
+                || msg.contains("Connection refused"),
+            "Expected network error, got: {}",
+            msg
+        );
+    }
+ 
 
     /// Respond to a handshake then stall on the next request (for timeout tests).
     fn accept_handshake_then_stall(stream: &mut std::net::TcpStream) {
@@ -1070,6 +1225,7 @@ mod tests {
         });
 
         let config = RemoteClientConfig {
+            connect_timeout: Duration::from_millis(5000),
             timeouts: RequestTimeouts {
                 ping: Duration::from_millis(50),
                 default: Duration::from_millis(1000), // Allow time for handshake
@@ -1164,6 +1320,7 @@ mod tests {
         });
 
         let config = RemoteClientConfig {
+            connect_timeout: Duration::from_millis(5000),
             timeouts: RequestTimeouts {
                 ping: Duration::from_millis(500),
                 ..RequestTimeouts::default()

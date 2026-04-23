@@ -139,6 +139,7 @@ mod tests {
                 operations: vec![],
                 storage_accesses: HashMap::new(),
                 call_tree: None,
+                timeline: None,
             }],
             suggestions: vec![],
             total_cpu: 1000,

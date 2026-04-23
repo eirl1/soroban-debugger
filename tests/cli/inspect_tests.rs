@@ -130,3 +130,25 @@ fn test_inspect_source_map_diagnostics_json_output() {
     .stdout(predicate::str::contains("\"sections\""))
     .stdout(predicate::str::contains("\"fallback_mode\""));
 }
+
+#[test]
+fn test_inspect_pretty_output_includes_artifact_metadata() {
+    let mut cmd = assert_cmd::Command::cargo_bin("soroban-debug").expect("Failed to find binary");
+    cmd.args(["inspect", "--contract", fixture_wasm()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Artifact metadata:"))
+        .stdout(predicate::str::contains("Build profile hint:"))
+        .stdout(predicate::str::contains("Optimization hint:"));
+}
+
+#[test]
+fn test_inspect_json_output_includes_artifact_metadata() {
+    let mut cmd = assert_cmd::Command::cargo_bin("soroban-debug").expect("Failed to find binary");
+    cmd.args(["inspect", "--contract", fixture_wasm(), "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"artifact_metadata\""))
+        .stdout(predicate::str::contains("\"build_profile_hint\""))
+        .stdout(predicate::str::contains("\"optimization_hint\""));
+}

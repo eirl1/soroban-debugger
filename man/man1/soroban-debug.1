@@ -58,7 +58,7 @@ Print version
 .SH SUBCOMMANDS
 .TP
 soroban\-debug\-run(1)
-Run a contract function with the debugger
+Execute a contract function with the debugger
 .TP
 soroban\-debug\-interactive(1)
 Start an interactive debugging session
@@ -69,14 +69,17 @@ Start an interactive REPL for contract exploration
 soroban\-debug\-tui(1)
 Launch the full\-screen TUI dashboard
 .TP
+soroban\-debug\-scenario(1)
+Run a multi\-step scenario from a TOML file
+.TP
+soroban\-debug\-replay(1)
+Replay execution from a previously exported trace file
+.TP
 soroban\-debug\-inspect(1)
 Inspect contract information without executing
 .TP
 soroban\-debug\-upgrade\-check(1)
 Check compatibility between two contract versions
-.TP
-soroban\-debug\-completions(1)
-Generate shell completion scripts
 .TP
 soroban\-debug\-optimize(1)
 Analyze contract and generate gas optimization suggestions
@@ -87,11 +90,11 @@ Profile a single function execution and print hotspots + suggestions
 soroban\-debug\-compare(1)
 Compare two execution trace JSON files side\-by\-side
 .TP
-soroban\-debug\-replay(1)
-Replay execution from a previously exported trace file
-.TP
 soroban\-debug\-symbolic(1)
 Run symbolic execution to explore contract input space
+.TP
+soroban\-debug\-analyze(1)
+Analyze contract for security vulnerabilities
 .TP
 soroban\-debug\-server(1)
 Start debug server for remote connections
@@ -99,11 +102,8 @@ Start debug server for remote connections
 soroban\-debug\-remote(1)
 Connect to remote debug server
 .TP
-soroban\-debug\-analyze(1)
-Analyze contract for security vulnerabilities
-.TP
-soroban\-debug\-scenario(1)
-Run a multi\-step scenario from a TOML file
+soroban\-debug\-completions(1)
+Generate shell completion scripts
 .TP
 soroban\-debug\-history\-prune(1)
 Prune or compact run history according to a retention policy

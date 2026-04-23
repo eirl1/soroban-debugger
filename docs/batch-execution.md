@@ -2,6 +2,8 @@
 
 The batch execution feature allows you to run the same contract function with multiple different argument sets in parallel, which is useful for batch regression testing and performance benchmarking.
 
+See the [Scenario Cookbook](scenario-cookbook.md) for examples of complex test patterns that can be used in batch execution.
+
 ## Usage
 
 ```bash

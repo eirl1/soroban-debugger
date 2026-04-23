@@ -43,6 +43,10 @@ pub struct RuleMetadata {
     pub name: String,
     pub description: String,
     pub severity: Severity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,14 +63,16 @@ pub struct ReportMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityWaiver {
-    pub fingerprint: String,
+pub struct AnalyzerSuppression {
+    pub rule_id: String,
+    pub contract_path: String,
+    pub location: Option<String>,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WaiverFile {
-    pub waivers: Vec<SecurityWaiver>,
+pub struct AnalyzerSuppressionsFile {
+    pub suppressions: Vec<AnalyzerSuppression>,
 }
 
 pub trait SecurityRule {
@@ -74,6 +80,12 @@ pub trait SecurityRule {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn severity(&self) -> Severity;
+    fn rationale(&self) -> Option<&str> {
+        None
+    }
+    fn remediation(&self) -> Option<&str> {
+        None
+    }
 
     fn metadata(&self) -> RuleMetadata {
         RuleMetadata {
@@ -81,6 +93,8 @@ pub trait SecurityRule {
             name: self.name().to_string(),
             description: self.description().to_string(),
             severity: self.severity(),
+            rationale: self.rationale().map(|s| s.to_string()),
+            remediation: self.remediation().map(|s| s.to_string()),
         }
     }
 
@@ -98,7 +112,7 @@ pub trait SecurityRule {
 
 pub struct SecurityAnalyzer {
     rules: Vec<Box<dyn SecurityRule>>,
-    waivers: Vec<SecurityWaiver>,
+    suppressions: Vec<AnalyzerSuppression>,
 }
 
 impl SecurityAnalyzer {
@@ -113,23 +127,26 @@ impl SecurityAnalyzer {
                 Box::new(UnboundedIterationRule),
                 Box::new(StorageWritePressureRule),
             ],
-            waivers: Vec::new(),
+            suppressions: Vec::new(),
         }
     }
 
-    pub fn with_waivers(mut self, waivers: Vec<SecurityWaiver>) -> Self {
-        self.waivers = waivers;
+    pub fn with_suppressions(mut self, suppressions: Vec<AnalyzerSuppression>) -> Self {
+        self.suppressions = suppressions;
         self
     }
 
-    pub fn load_waivers_from_file<P: AsRef<std::path::Path>>(mut self, path: P) -> Result<Self> {
+    pub fn load_suppressions_from_file<P: AsRef<std::path::Path>>(
+        mut self,
+        path: P,
+    ) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            crate::DebuggerError::FileError(format!("Failed to read waiver file: {}", e))
+            crate::DebuggerError::FileError(format!("Failed to read suppression file: {}", e))
         })?;
-        let waiver_file: WaiverFile = toml::from_str(&content).map_err(|e| {
-            crate::DebuggerError::FileError(format!("Failed to parse waiver TOML: {}", e))
+        let supp_file: AnalyzerSuppressionsFile = toml::from_str(&content).map_err(|e| {
+            crate::DebuggerError::FileError(format!("Failed to parse suppression TOML: {}", e))
         })?;
-        self.waivers = waiver_file.waivers;
+        self.suppressions = supp_file.suppressions;
         Ok(self)
     }
 
@@ -139,6 +156,7 @@ impl SecurityAnalyzer {
         executor: Option<&ContractExecutor>,
         trace: Option<&[DynamicTraceEvent]>,
         filter: &AnalyzerFilter,
+        contract_path: &str,
     ) -> Result<SecurityReport> {
         let mut report = SecurityReport::default();
 
@@ -177,22 +195,26 @@ impl SecurityAnalyzer {
             }
         }
 
-        self.apply_waivers(&mut report);
+        self.apply_suppressions(&mut report, contract_path);
         Ok(report)
     }
 
-    fn apply_waivers(&self, report: &mut SecurityReport) {
-        let waiver_set: HashSet<&str> = self
-            .waivers
-            .iter()
-            .map(|w| w.fingerprint.as_str())
-            .collect();
+    fn apply_suppressions(&self, report: &mut SecurityReport, contract_path: &str) {
         let mut suppressed_count = 0;
 
         for finding in &mut report.findings {
-            if waiver_set.contains(finding.fingerprint.as_str()) {
-                finding.suppressed = true;
-                suppressed_count += 1;
+            for supp in &self.suppressions {
+                if supp.rule_id == finding.rule_id
+                    && contract_path.contains(&supp.contract_path)
+                    && supp
+                        .location
+                        .as_ref()
+                        .map_or(true, |loc| finding.location.contains(loc))
+                {
+                    finding.suppressed = true;
+                    suppressed_count += 1;
+                    break;
+                }
             }
         }
 
@@ -312,6 +334,14 @@ impl SecurityRule for HardcodedAddressRule {
 
     fn severity(&self) -> Severity {
         Severity::Medium
+    }
+
+    fn rationale(&self) -> Option<&str> {
+        Some("Hardcoded addresses restrict contract portability, create lock-in, and complicate test environments where the address differs.")
+    }
+
+    fn remediation(&self) -> Option<&str> {
+        Some("Pass addresses via initialization/constructor parameters and persist them in standard contract storage.")
     }
 
     fn analyze_static(&self, wasm_bytes: &[u8]) -> Result<Vec<SecurityFinding>> {
@@ -524,6 +554,14 @@ impl SecurityRule for AuthorizationCheckRule {
 
     fn severity(&self) -> Severity {
         Severity::High
+    }
+
+    fn rationale(&self) -> Option<&str> {
+        Some("Missing require_auth calls allow unauthorized users to invoke sensitive endpoints and perform actions on behalf of others.")
+    }
+
+    fn remediation(&self) -> Option<&str> {
+        Some("Identify all caller arguments and invoke `address.require_auth()` before persisting state changes.")
     }
 
     fn analyze_dynamic(

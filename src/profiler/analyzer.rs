@@ -31,6 +31,7 @@ pub struct FunctionProfile {
     pub operations: Vec<OperationCost>,
     pub storage_accesses: HashMap<String, StorageAccess>,
     pub call_tree: Option<Vec<crate::profiler::session::CallFrame>>,
+    pub timeline: Option<Vec<crate::inspector::budget::ResourceCheckpoint>>,
 }
 
 /// Folded stack sample for external tools (issue #502).
@@ -129,6 +130,7 @@ impl GasOptimizer {
                     operations,
                     storage_accesses,
                     call_tree: None,
+                    timeline: Some(metrics.timeline.clone()),
                 };
                 self.function_profiles
                     .insert(function_name.to_string(), profile.clone());
@@ -144,6 +146,7 @@ impl GasOptimizer {
                     operations,
                     storage_accesses,
                     call_tree: None,
+                    timeline: Some(metrics.timeline.clone()),
                 };
                 self.function_profiles
                     .insert(function_name.to_string(), profile.clone());
@@ -163,6 +166,7 @@ impl GasOptimizer {
             operations,
             storage_accesses,
             call_tree: None,
+            timeline: Some(metrics.timeline),
         };
 
         self.function_profiles
@@ -379,6 +383,19 @@ impl GasOptimizer {
                     .unwrap();
                 }
                 writeln!(output).unwrap();
+            }
+
+            if let Some(timeline) = &function.timeline {
+                if timeline.len() > 1 {
+                    writeln!(output, "#### Resource Timeline").unwrap();
+                    writeln!(output).unwrap();
+                    writeln!(
+                        output,
+                        "{}",
+                        crate::output::format_resource_timeline(timeline)
+                    )
+                    .unwrap();
+                }
             }
         }
 

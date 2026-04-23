@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
-use wasmparser::{Operator, Parser, Payload, ValType};
+use wasmparser::{
+    Name, NameSectionReader, Operator, Parser, Payload, ProducersSectionReader, ValType,
+};
 
 // Re-export FunctionSignature for convenience
 pub use crate::analyzer::upgrade::FunctionSignature;
@@ -720,7 +722,7 @@ pub fn verify_wasm_hash(computed_hash: &str, expected_hash: Option<&String>) -> 
 /// High-level contract metadata extracted from WASM custom sections.
 ///
 /// All fields are optional; missing values are handled gracefully.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractMetadata {
     pub contract_version: Option<String>,
     pub sdk_version: Option<String>,
@@ -728,6 +730,303 @@ pub struct ContractMetadata {
     pub author: Option<String>,
     pub description: Option<String>,
     pub implementation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmProducerValue {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmProducerField {
+    pub name: String,
+    pub values: Vec<WasmProducerValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmArtifactMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_name: Option<String>,
+    pub name_section_present: bool,
+    pub has_debug_sections: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub debug_sections: Vec<String>,
+    pub debug_section_bytes: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub producers: Vec<WasmProducerField>,
+    pub build_profile_hint: String,
+    pub optimization_hint: String,
+    pub likely_stripped: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub package_hints: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub heuristic_notes: Vec<String>,
+}
+
+impl Default for WasmArtifactMetadata {
+    fn default() -> Self {
+        Self {
+            module_name: None,
+            name_section_present: false,
+            has_debug_sections: false,
+            debug_sections: Vec::new(),
+            debug_section_bytes: 0,
+            producers: Vec::new(),
+            build_profile_hint: "unknown".to_string(),
+            optimization_hint: "unknown".to_string(),
+            likely_stripped: false,
+            package_hints: Vec::new(),
+            heuristic_notes: Vec::new(),
+        }
+    }
+}
+
+fn is_debug_custom_section(name: &str) -> bool {
+    name.starts_with(".debug_")
+}
+
+fn push_hint(hints: &mut Vec<String>, hint: impl Into<String>) {
+    let hint = hint.into();
+    if !hints.contains(&hint) {
+        hints.push(hint);
+    }
+}
+
+fn derive_artifact_heuristics(
+    module_name: Option<&str>,
+    name_section_present: bool,
+    debug_sections: &[String],
+    producers: &[WasmProducerField],
+) -> (String, String, bool, Vec<String>, Vec<String>) {
+    let has_debug_sections = !debug_sections.is_empty();
+    let has_wasm_opt = producers.iter().any(|field| {
+        field.name == "processed-by"
+            && field
+                .values
+                .iter()
+                .any(|value| value.name.eq_ignore_ascii_case("wasm-opt"))
+    });
+    let has_rust_tooling = producers.iter().any(|field| {
+        field.values.iter().any(|value| {
+            value.name.eq_ignore_ascii_case("rust")
+                || value.name.eq_ignore_ascii_case("rustc")
+                || value.name.eq_ignore_ascii_case("cargo")
+        })
+    });
+
+    let build_profile_hint = if has_debug_sections && name_section_present {
+        "debug-like"
+    } else if has_debug_sections {
+        "release-with-debug-info"
+    } else if name_section_present {
+        "release-with-symbol-names"
+    } else {
+        "stripped-release-like"
+    }
+    .to_string();
+
+    let optimization_hint = if has_wasm_opt {
+        "aggressively optimized (wasm-opt present)"
+    } else if !has_debug_sections && !name_section_present {
+        "likely optimized or symbol-stripped"
+    } else if has_debug_sections && name_section_present {
+        "unlikely to be aggressively optimized"
+    } else if has_debug_sections {
+        "possibly optimized, but debug info was retained"
+    } else {
+        "limited optimization signal"
+    }
+    .to_string();
+
+    let likely_stripped = !has_debug_sections && !name_section_present;
+
+    let mut package_hints = Vec::new();
+    if let Some(module_name) = module_name {
+        push_hint(&mut package_hints, format!("module name: {module_name}"));
+    }
+    if has_rust_tooling {
+        push_hint(&mut package_hints, "rust toolchain markers present");
+    }
+    for field in producers {
+        for value in &field.values {
+            match field.name.as_str() {
+                "language" => {
+                    if value.version.is_empty() {
+                        push_hint(&mut package_hints, format!("language: {}", value.name));
+                    } else {
+                        push_hint(
+                            &mut package_hints,
+                            format!("language: {} {}", value.name, value.version),
+                        );
+                    }
+                }
+                "sdk" => {
+                    if value.version.is_empty() {
+                        push_hint(&mut package_hints, format!("sdk: {}", value.name));
+                    } else {
+                        push_hint(
+                            &mut package_hints,
+                            format!("sdk: {} {}", value.name, value.version),
+                        );
+                    }
+                }
+                "processed-by"
+                    if matches!(
+                        value.name.as_str(),
+                        "cargo" | "rustc" | "soroban-sdk" | "soroban-cli" | "wasm-opt"
+                    ) =>
+                {
+                    if value.version.is_empty() {
+                        push_hint(&mut package_hints, format!("tool: {}", value.name));
+                    } else {
+                        push_hint(
+                            &mut package_hints,
+                            format!("tool: {} {}", value.name, value.version),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut heuristic_notes = Vec::new();
+    if has_debug_sections {
+        heuristic_notes.push(format!(
+            "DWARF-style debug sections detected: {}.",
+            debug_sections.join(", ")
+        ));
+    } else {
+        heuristic_notes.push(
+            "No DWARF-style debug sections were detected; source-level debugging may be limited."
+                .to_string(),
+        );
+    }
+
+    if name_section_present {
+        heuristic_notes.push(
+            "A WASM name section is present, so symbol names are likely retained.".to_string(),
+        );
+    } else {
+        heuristic_notes.push(
+            "No WASM name section was detected, which often indicates a more stripped artifact."
+                .to_string(),
+        );
+    }
+
+    if has_wasm_opt {
+        heuristic_notes.push(
+            "The producers section reports wasm-opt, which is a strong signal of post-build optimization."
+                .to_string(),
+        );
+    }
+
+    (
+        build_profile_hint,
+        optimization_hint,
+        likely_stripped,
+        package_hints,
+        heuristic_notes,
+    )
+}
+
+pub fn extract_wasm_artifact_metadata(wasm_bytes: &[u8]) -> Result<WasmArtifactMetadata> {
+    let mut module_name = None;
+    let mut name_section_present = false;
+    let mut debug_sections = Vec::new();
+    let mut debug_section_bytes = 0usize;
+    let mut producers = Vec::new();
+
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload
+            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to parse WASM: {}", e)))?;
+
+        let Payload::CustomSection(reader) = payload else {
+            continue;
+        };
+
+        let section_name = reader.name();
+        if section_name == "name" {
+            name_section_present = true;
+            let name_reader = NameSectionReader::new(reader.data(), reader.data_offset());
+            for subsection in name_reader {
+                let subsection: Name<'_> = subsection.map_err(|e| {
+                    DebuggerError::WasmLoadError(format!(
+                        "Failed to read WASM name subsection: {}",
+                        e
+                    ))
+                })?;
+                if let Name::Module { name, .. } = subsection {
+                    module_name = Some(name.to_string());
+                    break;
+                }
+            }
+        } else if section_name == "producers" {
+            let producers_reader = ProducersSectionReader::new(reader.data(), reader.data_offset())
+                .map_err(|e| {
+                    DebuggerError::WasmLoadError(format!(
+                        "Failed to parse producers section: {}",
+                        e
+                    ))
+                })?;
+
+            for field in producers_reader {
+                let field = field.map_err(|e| {
+                    DebuggerError::WasmLoadError(format!("Failed to read producers field: {}", e))
+                })?;
+                let values = field
+                    .values
+                    .into_iter()
+                    .map(|value| {
+                        value.map(|value| WasmProducerValue {
+                            name: value.name.to_string(),
+                            version: value.version.to_string(),
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        DebuggerError::WasmLoadError(format!(
+                            "Failed to read producers values: {}",
+                            e
+                        ))
+                    })?;
+                producers.push(WasmProducerField {
+                    name: field.name.to_string(),
+                    values,
+                });
+            }
+        }
+
+        if is_debug_custom_section(section_name) {
+            debug_section_bytes += reader.data().len();
+            debug_sections.push(section_name.to_string());
+        }
+    }
+
+    debug_sections.sort();
+    let has_debug_sections = !debug_sections.is_empty();
+    let (build_profile_hint, optimization_hint, likely_stripped, package_hints, heuristic_notes) =
+        derive_artifact_heuristics(
+            module_name.as_deref(),
+            name_section_present,
+            &debug_sections,
+            &producers,
+        );
+
+    Ok(WasmArtifactMetadata {
+        module_name,
+        name_section_present,
+        has_debug_sections,
+        debug_sections,
+        debug_section_bytes,
+        producers,
+        build_profile_hint,
+        optimization_hint,
+        likely_stripped,
+        package_hints,
+        heuristic_notes,
+    })
 }
 
 impl ContractMetadata {
@@ -1189,26 +1488,64 @@ mod tests {
     /// Uses proper ULEB128 encoding so it works for payloads of any size,
     /// unlike a naïve single-byte length which panics above 127 bytes.
     fn make_custom_section_wasm(name: &str, payload: &[u8]) -> Vec<u8> {
+        make_wasm_with_custom_sections(&[(name, payload)])
+    }
+
+    fn make_wasm_with_custom_sections(sections: &[(&str, &[u8])]) -> Vec<u8> {
         let mut bytes = Vec::new();
 
         // WASM magic number and version.
         bytes.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d]);
         bytes.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
 
-        // Section id 0 = custom section.
-        bytes.push(0x00);
+        for (name, payload) in sections {
+            // Section id 0 = custom section.
+            bytes.push(0x00);
 
-        // Section content: LEB128(name.len) ++ name ++ payload.
-        let mut section = Vec::new();
-        section.extend_from_slice(&uleb128(name.len()));
-        section.extend_from_slice(name.as_bytes());
-        section.extend_from_slice(payload);
+            // Section content: LEB128(name.len) ++ name ++ payload.
+            let mut section = Vec::new();
+            section.extend_from_slice(&uleb128(name.len()));
+            section.extend_from_slice(name.as_bytes());
+            section.extend_from_slice(payload);
 
-        // Section size as LEB128, then the content.
-        bytes.extend_from_slice(&uleb128(section.len()));
-        bytes.extend_from_slice(&section);
+            // Section size as LEB128, then the content.
+            bytes.extend_from_slice(&uleb128(section.len()));
+            bytes.extend_from_slice(&section);
+        }
 
         bytes
+    }
+
+    fn make_name_section_payload(module_name: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(0x00); // module name subsection
+
+        let mut subsection = Vec::new();
+        subsection.extend_from_slice(&uleb128(module_name.len()));
+        subsection.extend_from_slice(module_name.as_bytes());
+
+        payload.extend_from_slice(&uleb128(subsection.len()));
+        payload.extend_from_slice(&subsection);
+        payload
+    }
+
+    fn make_producers_section_payload(fields: &[(&str, &[(&str, &str)])]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&uleb128(fields.len()));
+
+        for (field_name, values) in fields {
+            payload.extend_from_slice(&uleb128(field_name.len()));
+            payload.extend_from_slice(field_name.as_bytes());
+            payload.extend_from_slice(&uleb128(values.len()));
+            for (name, version) in *values {
+                payload.extend_from_slice(&uleb128(name.len()));
+                payload.extend_from_slice(name.as_bytes());
+                payload.extend_from_slice(&uleb128(version.len()));
+                payload.extend_from_slice(version.as_bytes());
+            }
+        }
+
+        payload
     }
 
     fn encode_string(bytes: &mut Vec<u8>, value: &str) {
@@ -1388,6 +1725,75 @@ implementation_notes=Line-based format
             ..Default::default()
         };
         assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn extract_wasm_artifact_metadata_detects_debug_sections_and_name_section() {
+        let name_payload = make_name_section_payload("counter_contract");
+        let wasm = make_wasm_with_custom_sections(&[
+            ("name", &name_payload),
+            (".debug_info", &[1, 2, 3, 4]),
+            (".debug_line", &[5, 6]),
+        ]);
+
+        let artifact =
+            extract_wasm_artifact_metadata(&wasm).expect("artifact metadata should parse");
+
+        assert_eq!(artifact.module_name.as_deref(), Some("counter_contract"));
+        assert!(artifact.name_section_present);
+        assert!(artifact.has_debug_sections);
+        assert_eq!(
+            artifact.debug_sections,
+            vec![".debug_info".to_string(), ".debug_line".to_string()]
+        );
+        assert_eq!(artifact.debug_section_bytes, 6);
+        assert_eq!(artifact.build_profile_hint, "debug-like");
+        assert!(artifact
+            .heuristic_notes
+            .iter()
+            .any(|note| note.contains("DWARF-style debug sections detected")));
+    }
+
+    #[test]
+    fn extract_wasm_artifact_metadata_parses_producers_and_optimization_hints() {
+        let producers_payload = make_producers_section_payload(&[
+            ("language", &[("rust", "1.78.0")]),
+            (
+                "processed-by",
+                &[
+                    ("cargo", "1.78.0"),
+                    ("rustc", "1.78.0"),
+                    ("wasm-opt", "116"),
+                ],
+            ),
+            ("sdk", &[("soroban-sdk", "22.0.2")]),
+        ]);
+        let wasm = make_wasm_with_custom_sections(&[("producers", &producers_payload)]);
+
+        let artifact =
+            extract_wasm_artifact_metadata(&wasm).expect("artifact metadata should parse");
+
+        assert!(!artifact.name_section_present);
+        assert!(!artifact.has_debug_sections);
+        assert_eq!(artifact.build_profile_hint, "stripped-release-like");
+        assert_eq!(
+            artifact.optimization_hint,
+            "aggressively optimized (wasm-opt present)"
+        );
+        assert!(artifact.likely_stripped);
+        assert_eq!(artifact.producers.len(), 3);
+        assert!(artifact
+            .package_hints
+            .iter()
+            .any(|hint| hint == "language: rust 1.78.0"));
+        assert!(artifact
+            .package_hints
+            .iter()
+            .any(|hint| hint == "sdk: soroban-sdk 22.0.2"));
+        assert!(artifact
+            .heuristic_notes
+            .iter()
+            .any(|note| note.contains("wasm-opt")));
     }
 
     // ── error extraction tests ────────────────────────────────────────────────

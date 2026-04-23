@@ -10,6 +10,7 @@
 //! so it can be unit-tested with a minimal WASM fixture.
 
 use crate::debugger::error_db::ErrorDatabase;
+use crate::utils::wasm::{extract_wasm_artifact_metadata, WasmArtifactMetadata};
 use crate::{DebuggerError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use soroban_env_host::DiagnosticLevel;
@@ -23,6 +24,10 @@ pub struct LoadedContract {
     pub error_db: ErrorDatabase,
 }
 
+pub fn inspect_contract_artifact(wasm: &[u8]) -> Result<WasmArtifactMetadata> {
+    extract_wasm_artifact_metadata(wasm)
+}
+
 /// Initialise a Soroban test environment and register `wasm` as a contract.
 ///
 /// Displays a progress bar to the terminal while work is in progress and
@@ -30,6 +35,23 @@ pub struct LoadedContract {
 #[tracing::instrument(skip_all)]
 pub fn load_contract(wasm: &[u8]) -> Result<LoadedContract> {
     info!("Initializing contract executor");
+
+    if let Ok(artifact) = inspect_contract_artifact(wasm) {
+        info!(
+            build_profile_hint = %artifact.build_profile_hint,
+            optimization_hint = %artifact.optimization_hint,
+            has_debug_sections = artifact.has_debug_sections,
+            name_section_present = artifact.name_section_present,
+            module_name = artifact.module_name.as_deref().unwrap_or("<none>"),
+            "Parsed WASM artifact metadata"
+        );
+
+        if !artifact.has_debug_sections {
+            warn!(
+                "WASM artifact does not contain DWARF debug sections; source-level debugging may fall back to WASM-only behavior"
+            );
+        }
+    }
 
     let pb = ProgressBar::new(100);
     pb.set_style(
