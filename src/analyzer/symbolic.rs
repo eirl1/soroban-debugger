@@ -1,3 +1,4 @@
+use crate::output::*;
 use crate::runtime::executor::ContractExecutor;
 use crate::utils::wasm::{parse_function_signatures, ContractFunctionSignature};
 use crate::{DebuggerError, Result};
@@ -86,6 +87,46 @@ impl SymbolicConfig {
             seed: None,
             storage_seed: None,
         }
+    }
+}
+
+pub fn build_replay_bundle(
+    config: &SymbolicConfig,
+    report: &SymbolicReport,
+    contract_sha256: String,
+    contract_path: Option<String>,
+) -> SymbolicReplayBundle {
+    SymbolicReplayBundle {
+        schema_version: 1,
+        command: "symbolic".to_string(),
+
+        contract: ContractInfo {
+            sha256: contract_sha256,
+            path_hint: contract_path,
+        },
+
+        invocation: InvocationInfo {
+            function: report.function.clone(),
+        },
+
+        config: ReplayConfig {
+            seed: config.seed,
+            max_paths: Some(config.max_paths),
+            max_input_combinations: Some(config.max_input_combinations),
+            max_breadth: Some(config.max_breadth),
+            max_depth: Some(config.max_depth),
+            timeout_secs: Some(config.timeout_secs),
+        },
+
+        storage_seed: config.storage_seed.as_ref().map(|s| StorageSeed {
+            format: "json".to_string(),
+            data: s.clone(),
+        }),
+
+        metadata: Some(ReplayMetadata {
+            paths_explored: report.paths_explored,
+            panics_found: report.panics_found,
+        }),
     }
 }
 

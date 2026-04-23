@@ -491,7 +491,7 @@ impl GasOptimizer {
         }
 
         // Sort by cost descending
-        trees.sort_by(|a, b| b.cpu_cost.cmp(&a.cpu_cost));
+        trees.sort_by_key(|b| std::cmp::Reverse(b.cpu_cost));
         trees
     }
 } // ✅ end impl GasOptimizer (IMPORTANT)

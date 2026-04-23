@@ -442,7 +442,7 @@ impl MemoryTracker {
 
     pub fn get_top_allocations(&self, count: usize) -> Vec<MemoryAllocation> {
         let mut sorted: Vec<MemoryAllocation> = self.allocations.iter().cloned().collect();
-        sorted.sort_by(|a, b| b.size.cmp(&a.size));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.size));
         sorted.into_iter().take(count).collect()
     }
 

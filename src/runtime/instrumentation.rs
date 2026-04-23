@@ -56,7 +56,7 @@ impl InstructionCounter {
             .ok()
             .map(|c| c.iter().map(|(k, v)| (k.clone(), *v)).collect::<Vec<_>>())
             .unwrap_or_default();
-        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        counts.sort_by_key(|b| std::cmp::Reverse(b.1));
         counts
     }
 

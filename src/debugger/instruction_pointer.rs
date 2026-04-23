@@ -129,10 +129,8 @@ impl InstructionPointer {
             | wasmparser::Operator::If { .. } => {
                 self.block_depth += 1;
             }
-            wasmparser::Operator::End => {
-                if self.block_depth > 0 {
-                    self.block_depth -= 1;
-                }
+            wasmparser::Operator::End if self.block_depth > 0 => {
+                self.block_depth -= 1;
             }
             _ => {}
         }

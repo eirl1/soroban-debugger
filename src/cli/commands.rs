@@ -1,6 +1,9 @@
 use crate::analyzer::symbolic::SymbolicConfig;
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
-use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
+use crate::analyzer::{
+    security::SecurityAnalyzer,
+    symbolic::{build_replay_bundle, SymbolicAnalyzer},
+};
 use crate::cli::args::{
     AnalyzeArgs, CompareArgs, HistoryPruneArgs, InspectArgs, InteractiveArgs, OptimizeArgs,
     OutputFormat, ProfileArgs, RemoteAction, RemoteArgs, ReplArgs, ReplayArgs, RunArgs,
@@ -2312,6 +2315,25 @@ pub fn symbolic(args: SymbolicArgs, _verbosity: Verbosity) -> Result<()> {
             ))
         })?;
         print_success(format!("Scenario TOML written to: {:?}", output_path));
+    }
+
+    if let Some(bundle_path) = &args.export_replay_bundle {
+        let bundle = build_replay_bundle(
+            &config,
+            &report,
+            wasm_file.sha256_hash.clone(),
+            Some(args.contract.to_string_lossy().to_string()),
+        );
+        let serialized = serde_json::to_string_pretty(&bundle).map_err(|e| {
+            DebuggerError::FileError(format!("Failed to serialize replay bundle to JSON: {}", e))
+        })?;
+        fs::write(bundle_path, serialized).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to write replay bundle to {:?}: {}",
+                bundle_path, e
+            ))
+        })?;
+        print_success(format!("Replay bundle written to: {:?}", bundle_path));
     }
 
     Ok(())

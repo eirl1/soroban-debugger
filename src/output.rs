@@ -2,9 +2,7 @@
 //!
 //! Supports `NO_COLOR` (disable ANSI colors) and `--no-unicode` (ASCII-only output).
 
-use crate::inspector::budget::ResourceCheckpoint;
-
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static NO_UNICODE: AtomicBool = AtomicBool::new(false);
@@ -60,6 +58,52 @@ where
             }),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SymbolicReplayBundle {
+    pub schema_version: u8,
+    pub command: String,
+
+    pub contract: ContractInfo,
+    pub invocation: InvocationInfo,
+    pub config: ReplayConfig,
+
+    pub storage_seed: Option<StorageSeed>,
+    pub metadata: Option<ReplayMetadata>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ContractInfo {
+    pub sha256: String,
+    pub path_hint: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct InvocationInfo {
+    pub function: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReplayConfig {
+    pub seed: Option<u64>,
+    pub max_paths: Option<usize>,
+    pub max_input_combinations: Option<usize>,
+    pub max_breadth: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct StorageSeed {
+    pub format: String,
+    pub data: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReplayMetadata {
+    pub paths_explored: usize,
+    pub panics_found: usize,
 }
 
 /// Global output/accessibility configuration.
@@ -216,24 +260,72 @@ impl OutputWriter {
     }
 }
 
-pub fn format_resource_timeline(checkpoints: &[ResourceCheckpoint]) -> String {
-    let mut out = String::new();
-    out.push_str("Timeline Execution Sequence:\n");
-    for (i, cp) in checkpoints.iter().enumerate() {
-        if i == 0 {
-            out.push_str(&format!(
-                "  [+{}ms] Start: {} CPU, {} Mem\n",
-                cp.timestamp_ms, cp.cpu_instructions, cp.memory_bytes
-            ));
-        } else {
-            let prev = &checkpoints[i - 1];
-            let cpu_delta = cp.cpu_instructions.saturating_sub(prev.cpu_instructions);
-            let mem_delta = cp.memory_bytes.saturating_sub(prev.memory_bytes);
-            out.push_str(&format!(
-                "  [+{}ms] +{} CPU, +{} Mem at {}\n",
-                cp.timestamp_ms, cpu_delta, mem_delta, cp.location_name
-            ));
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replay_bundle_serializes() {
+        let bundle = SymbolicReplayBundle {
+            schema_version: 1,
+            command: "symbolic".to_string(),
+            contract: ContractInfo {
+                sha256: "abc".to_string(),
+                path_hint: None,
+            },
+            invocation: InvocationInfo {
+                function: "test".to_string(),
+            },
+            config: ReplayConfig {
+                seed: Some(1),
+                max_paths: None,
+                max_input_combinations: None,
+                max_breadth: None,
+                max_depth: None,
+                timeout_secs: None,
+            },
+            storage_seed: None,
+            metadata: None,
+        };
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(json.contains("schema_version"));
+        assert!(json.contains("symbolic"));
     }
-    out
+
+    #[test]
+    fn test_replay_bundle_optional_fields_serialization() {
+        let bundle = SymbolicReplayBundle {
+            schema_version: 1,
+            command: "symbolic".to_string(),
+            contract: ContractInfo {
+                sha256: "abc".to_string(),
+                path_hint: Some("contract.wasm".to_string()),
+            },
+            invocation: InvocationInfo {
+                function: "test".to_string(),
+            },
+            config: ReplayConfig {
+                seed: None,
+                max_paths: Some(10),
+                max_input_combinations: Some(20),
+                max_breadth: Some(2),
+                max_depth: Some(3),
+                timeout_secs: Some(30),
+            },
+            storage_seed: Some(StorageSeed {
+                format: "json".to_string(),
+                data: "{}".to_string(),
+            }),
+            metadata: Some(ReplayMetadata {
+                paths_explored: 5,
+                panics_found: 1,
+            }),
+        };
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(json.contains("storage_seed"));
+        assert!(json.contains("metadata"));
+        assert!(json.contains("contract.wasm"));
+    }
 }

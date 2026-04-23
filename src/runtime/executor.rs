@@ -438,7 +438,7 @@ impl ContractExecutor {
             .iter()
             .map(|(name, &cpu)| (name.clone(), cpu))
             .collect();
-        function_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        function_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
         let total = function_counts.iter().map(|(_, c)| c).sum();
         Ok(InstructionCounts {
             function_counts,

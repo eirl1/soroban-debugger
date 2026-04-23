@@ -991,6 +991,10 @@ pub struct SymbolicArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
+    /// Export a symbolic replay bundle to JSON
+    #[arg(long, value_name = "FILE")]
+    pub export_replay_bundle: Option<PathBuf>,
+
     /// Preset symbolic exploration budget profile
     #[arg(long, value_enum, default_value_t = SymbolicProfile::Balanced)]
     pub profile: SymbolicProfile,

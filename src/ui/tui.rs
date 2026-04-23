@@ -264,7 +264,7 @@ impl DebuggerUI {
         crate::logging::log_display("", crate::logging::LogLevel::Info);
 
         let mut items: Vec<_> = entries.iter().collect();
-        items.sort_by(|(ka, _), (kb, _)| ka.cmp(kb));
+        items.sort_by_key(|(ka, _)| *ka);
 
         for (key, value) in items {
             crate::logging::log_display(

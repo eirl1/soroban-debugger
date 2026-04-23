@@ -53,7 +53,7 @@ impl InstructionCounter {
     pub fn get_counts(&self) -> Vec<FunctionInstructionCount> {
         let mut counts: Vec<FunctionInstructionCount> =
             self.function_counts.values().cloned().collect();
-        counts.sort_by(|a, b| b.instruction_count.cmp(&a.instruction_count));
+        counts.sort_by_key(|b| std::cmp::Reverse(b.instruction_count));
         counts
     }
 
