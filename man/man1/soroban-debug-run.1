@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH run 1  "run " 
 .SH NAME
-run \- Run a contract function with the debugger
+run \- Execute a contract function with the debugger
 .SH SYNOPSIS
 \fBrun\fR [\fB\-c\fR|\fB\-\-contract\fR] [\fB\-f\fR|\fB\-\-function\fR] [\fB\-a\fR|\fB\-\-args\fR] [\fB\-s\fR|\fB\-\-storage\fR] [\fB\-b\fR|\fB\-\-breakpoint\fR] [\fB\-\-network\-snapshot\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-server\fR] [\fB\-p\fR|\fB\-\-port\fR] [\fB\-\-host\fR] [\fB\-\-remote\fR] [\fB\-t\fR|\fB\-\-token\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-\-format\fR] [\fB\-\-output\fR] [\fB\-\-show\-events\fR] [\fB\-\-show\-auth\fR] [\fB\-\-json\fR] [\fB\-\-filter\-topic\fR] [\fB\-\-event\-filter\fR] [\fB\-\-repeat\fR] [\fB\-\-mock\fR] [\fB\-\-storage\-filter\fR] [\fB\-\-instruction\-debug\fR] [\fB\-\-step\-instructions\fR] [\fB\-\-step\-mode\fR] [\fB\-\-dry\-run\fR] [\fB\-\-export\-storage\fR] [\fB\-\-import\-storage\fR] [\fB\-\-batch\-args\fR] [\fB\-\-generate\-test\fR] [\fB\-\-overwrite\fR] [\fB\-\-timeout\fR] [\fB\-\-alert\-on\-change\fR] [\fB\-\-expected\-hash\fR] [\fB\-\-show\-ledger\fR] [\fB\-\-ttl\-warning\-threshold\fR] [\fB\-\-trace\-output\fR] [\fB\-\-save\-output\fR] [\fB\-\-append\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Run a contract function with the debugger
+Execute a contract function with the debugger
 .SH OPTIONS
 .TP
 \fB\-c\fR, \fB\-\-contract\fR \fI<CONTRACT>\fR
@@ -59,7 +59,13 @@ Output mode for command result rendering (pretty, json)
 .br
 
 .br
-[\fIpossible values: \fRpretty, json]
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+pretty
+.IP \(bu 2
+json
+.RE
 .TP
 \fB\-\-show\-events\fR
 Show contract events emitted during execution

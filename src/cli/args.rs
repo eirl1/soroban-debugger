@@ -152,55 +152,76 @@ impl Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
-    /// Run a contract function with the debugger
+    // --- Run and Debug ---
+    /// Execute a contract function with the debugger
+    #[command(subcommand_help_heading = "Run and Debug")]
     Run(RunArgs),
 
     /// Start an interactive debugging session
+    #[command(subcommand_help_heading = "Run and Debug")]
     Interactive(InteractiveArgs),
 
     /// Start an interactive REPL for contract exploration
+    #[command(subcommand_help_heading = "Run and Debug")]
     Repl(ReplArgs),
 
     /// Launch the full-screen TUI dashboard
+    #[command(subcommand_help_heading = "Run and Debug")]
     Tui(TuiArgs),
 
+    /// Run a multi-step scenario from a TOML file
+    #[command(subcommand_help_heading = "Run and Debug")]
+    Scenario(ScenarioArgs),
+
+    /// Replay execution from a previously exported trace file
+    #[command(subcommand_help_heading = "Run and Debug")]
+    Replay(ReplayArgs),
+
+    // --- Analyze and Compare ---
     /// Inspect contract information without executing
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Inspect(InspectArgs),
 
     /// Check compatibility between two contract versions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     UpgradeCheck(UpgradeCheckArgs),
 
-    /// Generate shell completion scripts
-    Completions(CompletionsArgs),
-
     /// Analyze contract and generate gas optimization suggestions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Optimize(OptimizeArgs),
 
     /// Profile a single function execution and print hotspots + suggestions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Profile(ProfileArgs),
 
     /// Compare two execution trace JSON files side-by-side
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Compare(CompareArgs),
 
-    /// Replay execution from a previously exported trace file
-    Replay(ReplayArgs),
-
     /// Run symbolic execution to explore contract input space
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Symbolic(SymbolicArgs),
 
+    /// Analyze contract for security vulnerabilities
+    #[command(subcommand_help_heading = "Analyze and Compare")]
+    Analyze(AnalyzeArgs),
+
+    // --- Remote and Server ---
     /// Start debug server for remote connections
+    #[command(subcommand_help_heading = "Remote and Server")]
     Server(ServerArgs),
 
     /// Connect to remote debug server
+    #[command(subcommand_help_heading = "Remote and Server")]
     Remote(RemoteArgs),
 
-    /// Analyze contract for security vulnerabilities
-    Analyze(AnalyzeArgs),
-
-    /// Run a multi-step scenario from a TOML file
-    Scenario(ScenarioArgs),
+    // --- Developer Utilities ---
+    /// Generate shell completion scripts
+    #[command(subcommand_help_heading = "Developer Utilities")]
+    Completions(CompletionsArgs),
 
     /// Prune or compact run history according to a retention policy
+    #[command(subcommand_help_heading = "Developer Utilities")]
     HistoryPrune(HistoryPruneArgs),
 
     /// Plugin-provided subcommand (loaded at runtime)

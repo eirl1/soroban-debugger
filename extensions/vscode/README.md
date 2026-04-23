@@ -13,6 +13,10 @@ A Visual Studio Code extension that integrates the Soroban smart contract debugg
 - 📝 **Detailed Logging**: Optional trace logging for debugging adapter interactions
 - ⚡ **Real-time Debugging**: Step through contract execution with next, step in, and step out
 
+## Privacy & Telemetry
+
+The extension includes **opt-in** failure telemetry to help us improve the tool. No contract data or secrets are ever collected. See [Telemetry Documentation](docs/telemetry.md) for details.
+
 ## Requirements
 
 - Visual Studio Code 1.75.0 or higher
@@ -468,19 +472,19 @@ make ci-local
 
 ```
 ├── src/
-│   ├── extension.ts          # Extension entry point
-│   ├── debug/
-│   │   └── adapter.ts        # VSCode debug adapter factory
-│   ├── dap/
-│   │   ├── adapter.ts        # DAP session implementation
-│   │   └── protocol.ts       # Protocol types and utilities
-│   └── cli/
-│       └── debuggerProcess.ts # CLI process wrapper
-│   ├── test/
-│   │   ├── runSmokeTest.ts   # Smoke test entrypoint
-│   │   ├── runDapE2E.ts      # DAP end-to-end entrypoint
-│   │   ├── runTest.ts        # Combined compatibility wrapper
-│   │   └── suites.ts         # Shared test suite helpers
+├── extension.ts          # Extension entry point
+├── debug/
+│   └── adapter.ts        # VSCode debug adapter factory
+├── dap/
+│   ├── adapter.ts        # DAP session implementation
+│   └── protocol.ts       # Protocol types and utilities
+└── cli/
+    └── debuggerProcess.ts # CLI process wrapper
+├── test/
+│   ├── runSmokeTest.ts   # Smoke test entrypoint
+│   ├── runDapE2E.ts      # DAP end-to-end entrypoint
+│   ├── runTest.ts        # Combined compatibility wrapper
+│   └── suites.ts         # Shared test suite helpers
 ├── package.json              # Extension manifest
 ├── tsconfig.json            # TypeScript configuration
 └── README.md                # This file
