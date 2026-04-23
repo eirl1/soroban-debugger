@@ -338,7 +338,10 @@ impl RemoteClient {
         match response {
             DebugResponse::HandshakeAck {
                 selected_version, ..
-            } => Ok(selected_version),
+            } => {
+                self.selected_protocol_version = Some(selected_version);
+                Ok(selected_version)
+            }
             DebugResponse::IncompatibleProtocol { message, .. } => {
                 Err(DebuggerError::ExecutionError(format!(
                     "Incompatible debugger protocol: {}",
