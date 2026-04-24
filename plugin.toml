@@ -1,0 +1,16 @@
+name = "starter-plugin"
+version = "0.1.0"
+description = "A starter template for building Soroban Debugger plugins"
+author = "Your Name"
+license = "MIT"
+min_debugger_version = "0.1.0"
+
+[capabilities]
+hooks_execution = true
+provides_commands = true
+provides_formatters = false
+supports_hot_reload = false
+
+library = "libsoroban_debug_starter_plugin.so"
+
+dependencies = []

@@ -1,270 +1,39 @@
-# Soroban Debugger
+# Soroban Debugger Starter Plugin
 
-[![CI](https://github.com/Timi16/soroban-debugger/actions/workflows/ci.yml/badge.svg)](https://github.com/Timi16/soroban-debugger/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/Timi16/soroban-debugger/branch/main/graph/badge.svg)](https://codecov.io/gh/Timi16/soroban-debugger)
-[![Latest Release](https://img.shields.io/github/v/release/Timi16/soroban-debugger?logo=github)](https://github.com/Timi16/soroban-debugger/releases)
+This is a template to help you quickly build your own plugins for the Soroban Debugger.
 
-A command-line debugger for Soroban smart contracts on the Stellar network. Debug your contracts interactively with breakpoints, step-through execution, state inspection, and budget tracking.
+## Getting Started
 
-## Table of Contents
-- [Quick Start](#quick-start)
-- [User Journeys](#user-journeys)
-- [Command Index](#command-index)
-- [Reference](#reference)
-  - [Supported Argument Types](#supported-argument-types)
-  - [Storage Filtering](#storage-filtering)
-  - [Exporting Execution Traces](#exporting-execution-traces)
-- [Interactive Commands](#interactive-command)
-- [Examples](#examples)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
+1. Copy this directory to use as the base for your new plugin.
+2. Rename the package in `Cargo.toml`.
+3. Update the `plugin.toml` manifest with your plugin's details.
+4. Update the `[capabilities]` section depending on whether you need to hook execution, provide custom CLI commands, or use formatters.
 
----
-
-## Quick Start
-
-### 1. Installation
-
-#### Using Cargo (Recommended)
-```bash
-cargo install soroban-debugger
-```
-
-#### From Source
-```bash
-git clone https://github.com/Timi16/soroban-debugger.git
-cd soroban-debugger
-cargo install --path .
-```
-
-### 2. Your First Debug Run
-
-Debug a contract by specifying the WASM file and function to execute:
+## Building
 
 ```bash
-soroban-debug run --contract token.wasm --function transfer --args '["Alice", "Bob", 100]'
+cargo build --release
 ```
 
-For an interactive session with a terminal UI:
-```bash
-soroban-debug interactive --contract my_contract.wasm --function hello
-```
+## Installing
 
-For a comprehensive introduction, see the [Getting Started Guide](docs/getting-started.md).
-
----
-
-## User Journeys
-
-### 🛠️ Debugging Your First Contract
-Learn how to execute functions, pass complex arguments, and use the interactive debugger.
-
-- **Basic Execution**: Use the `run` command to execute functions and see results immediately.
-- **Interactive Mode**: Use `interactive` for a step-by-step walkthrough with breakpoints.
-- **REPL**: Use `repl` for repeated calls and exploration without restarting.
-- **Complex Arguments**: Support for JSON-nested vectors, maps, and [typed annotations](#typed-annotations).
-
-### 🔍 Source-Level Debugging
-Debug your Rust code directly instead of raw WASM instructions.
-
-- **Rust Source Mapping**: Automatically maps WASM offsets back to Rust lines using DWARF debug info.
-- **Instruction Stepping**: Step into, over, or out of functions at the source level.
-- **Source Map Caching**: Fast O(1) lookups for source locations after the first load.
-
-See [Source-Level Debugging Guide](docs/source-level-debugging.md) for details.
-
-### 🌐 Remote Debugging Sessions
-Debug contracts running on remote servers or in CI environments.
-
-- **Debug Server**: Start a `server` process to host a debugging session.
-- **Remote Client**: Connect to a running server using the `remote` command.
-- **Secure Connections**: Support for TLS and token-based authentication.
-
-See [Remote Debugging Guide](docs/remote-debugging.md) for setup instructions.
-
-### 📈 Analysis & Optimization
-Analyze contract metadata, resource usage, and upgrade compatibility.
-
-- **Inspection**: Use `inspect` to view contract functions and metadata without executing.
-- **Profiling**: Use `profile` to find hotspots and budget-heavy execution paths.
-- **Optimization**: Use `optimize` for automated gas and performance suggestions.
-- **Upgrade Checks**: Use `upgrade-check` to ensure API compatibility between versions.
-
-### 🤖 Regression & Automated Testing
-Integrate debugging into your CI/CD pipeline and discover edge cases.
-
-- **Scenarios**: Define multi-step integration tests in simple [TOML files](docs/tutorials/scenario-runner.md).
-- **Batch Execution**: Run the same function with [multiple argument sets](docs/batch-execution.md) in parallel.
-- **Symbolic Analysis**: Automatically explore input spaces to find panics and edge cases.
-- **Test Generation**: Generate ready-to-run Rust unit tests from any debug session.
-
----
-
-## Command Index
-
-| Category | Commands |
-| --- | --- |
-| **Run & Debug** | `run`, `interactive`, `repl`, `tui`, `scenario`, `replay` |
-| **Analyze & Compare** | `inspect`, `upgrade-check`, `optimize`, `profile`, `compare`, `symbolic`, `analyze` |
-| **Remote & Server** | `server`, `remote` |
-| **Utilities** | `completions`, `history-prune` |
-
-> Use `soroban-debug <command> --help` for full flags and examples.
-
----
-
-## Reference
-
-### Supported Argument Types
-
-The debugger supports passing typed arguments via the `--args` flag.
-
-| JSON Value | Soroban Type | Example |
-| --- | --- | --- |
-| Number | `i128` | `10`, `-5` |
-| String | `Symbol` | `"hello"` |
-| Boolean | `Bool` | `true` |
-| Array | `Vec<Val>` | `[1, 2, 3]` |
-| Object | `Map` | `{"key": "value"}` |
-
-#### Typed Annotations
-For precise control, use `{"type": "...", "value": ...}`:
-`u32`, `i32`, `u64`, `i64`, `u128`, `i128`, `bool`, `symbol`, `string`, `address`.
-
-### Storage Filtering
-
-Filter large storage outputs by key pattern using `--storage-filter`:
+Create a directory for your plugin inside the debugger's plugin directory:
 
 ```bash
-# Prefix match: keys starting with "balance:"
-soroban-debug run --contract token.wasm --function mint \
-  --storage-filter 'balance:*'
-
-# Regex match: keys matching a pattern
-soroban-debug run --contract token.wasm --function mint \
-  --storage-filter 're:^user_\d+$'
-
-# Exact match
-soroban-debug run --contract token.wasm --function mint \
-  --storage-filter 'total_supply'
-
-# Multiple filters (combined with OR)
-soroban-debug run --contract token.wasm --function mint \
-  --storage-filter 'balance:*' \
-  --storage-filter 'total_supply'
+mkdir -p ~/.soroban-debug/plugins/starter-plugin
 ```
 
-#### Exporting Execution Traces
-
-You can export a full record of the contract execution to a JSON file using the `--trace-output` flag. This trace captures function calls, arguments, return values, storage snapshots (before and after), events, and budget consumption.
+Copy the compiled dynamic library and the manifest (adjusting the library extension for your OS):
 
 ```bash
-soroban-debug run \
-  --contract contract.wasm \
-  --function hello \
-  --trace-output execution_trace.json
+cp target/release/libsoroban_debug_starter_plugin.so ~/.soroban-debug/plugins/starter-plugin/
+cp plugin.toml ~/.soroban-debug/plugins/starter-plugin/
 ```
 
-These traces can later be used with the `compare` command to identify regressions or differences between runs.
+## Running
 
-##### Example Trace Output (JSON)
-
-An exported trace includes versioning, metadata, and full execution state:
-
-```json
-{
-  "version": "1.0",
-  "label": "Execution of hello",
-  "contract": "CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5",
-  "function": "hello",
-  "args": "[\"world\"]",
-  "storage_before": {
-    "counter": "0"
-  },
-  "storage": {
-    "counter": "1"
-  },
-  "budget": {
-    "cpu_instructions": 1540,
-    "memory_bytes": 450,
-    "cpu_limit": 1000000,
-    "memory_limit": 1000000
-  },
-  "return_value": "void",
-  "call_sequence": [
-    {
-      "function": "hello",
-      "args": "[\"world\"]",
-      "depth": 0,
-      "budget": {
-        "cpu_instructions": 1540,
-        "memory_bytes": 450
-      }
-    }
-  ],
-  "events": [
-    {
-      "contract_id": "CA7Q...",
-      "topics": ["\"greeting\""],
-      "data": "\"Hello, world!\""
-    }
-  ]
-}
-```
-
-| Pattern          | Type   | Matches                                |
-|------------------|--------|----------------------------------------|
-| `balance:*`      | Prefix | Keys starting with `balance:`          |
-| `re:^user_\d+$`  | Regex  | Keys matching the regex                |
-| `total_supply`   | Exact  | Only the key `total_supply`            |
-
-### Interactive Command
-
-Start an interactive debugging session:
-
-```bash
-soroban-debug interactive [OPTIONS]
-
-Options:
-  -c, --contract <FILE>     Path to the contract WASM file
-```
-
-### Inspect Command
-
-View contract information without executing:
-
-```bash
-soroban-debug inspect [OPTIONS]
-
-Options:
-  -c, --contract <FILE>     Path to the contract WASM file
-      --source-map-diagnostics
-                            Print resolved mappings, missing DWARF sections, and fallback behavior
-      --dependency-graph     Export cross-contract dependency graph (DOT + Mermaid)
-```
-
-Use `soroban-debug inspect --contract my_contract.wasm --source-map-diagnostics --format json`
-when you want a non-interactive DWARF triage report for CI or editor tooling.
-
-For full examples, see [docs/dependency-graph.md](https://github.com/Timi16/soroban-debugger/blob/main/docs/dependency-graph.md).
-
-### Upgrade Check Command
-
-Compare two contract binaries for API breakage and execution differences before releasing:
-
-```bash
-soroban-debug upgrade-check --old current.wasm --new upgraded.wasm
-```
-
-The debugger runs parallel traces and classifies the upgrade:
-- **Safe:** No breaking changes, stable inputs execution.
-- **Caution:** Non-breaking changes like new map arguments or endpoints.
-- **Breaking:** Removed functions, changed signatures, or execution panic regressions.
-
-### Completions Command
-
-Generate shell completion scripts for your favorite shell:
+Once installed, the Soroban Debugger will automatically discover and load your plugin on startup.
+Because of the default trust policy, you may need to add it to your allowlist or run in local-only mode:
 
 ```bash
 soroban-debug completions bash > /usr/local/etc/bash_completion.d/soroban-debug

@@ -1,12 +1,5 @@
-[workspace]
-members = [
-    ".",
-    "crates/soroban-debug-mock",
-    "examples/mock-usage",
-]
-
 [package]
-name = "soroban-debugger"
+name = "soroban-debug-starter-plugin"
 version = "0.1.0"
 edition = "2021"
 authors = ["Soroban Debugger Contributors"]
@@ -166,6 +159,8 @@ path = "src/bin/bench-regression.rs"
 bench = false
 
 [lib]
-name = "soroban_debugger"
-path = "src/lib.rs"
-bench = false
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-debugger = { path = "../../../" }
+tracing = "0.1"
