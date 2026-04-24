@@ -4,6 +4,7 @@
 .SH NAME
 remote \- Connect to remote debug server
 .SH SYNOPSIS
+\fBremote\fR <\fB\-r\fR|\fB\-\-remote\fR> [\fB\-t\fR|\fB\-\-token\fR] [\fB\-c\fR|\fB\-\-contract\fR] [\fB\-f\fR|\fB\-\-function\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-\-tls\-ca\fR] [\fB\-\-session\-label\fR] [\fB\-a\fR|\fB\-\-args\fR] [\fB\-\-connect\-timeout\-ms\fR] [\fB\-\-timeout\-ms\fR] [\fB\-\-inspect\-timeout\-ms\fR] [\fB\-\-storage\-timeout\-ms\fR] [\fB\-\-retry\-attempts\fR] [\fB\-\-retry\-base\-delay\-ms\fR] [\fB\-\-retry\-max\-delay\-ms\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIremote and server\fR]
 \fBremote\fR <\fB\-r\fR|\fB\-\-remote\fR> [\fB\-t\fR|\fB\-\-token\fR] [\fB\-c\fR|\fB\-\-contract\fR] [\fB\-f\fR|\fB\-\-function\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-\-tls\-ca\fR] [\fB\-a\fR|\fB\-\-args\fR] [\fB\-\-connect\-timeout\-ms\fR] [\fB\-\-timeout\-ms\fR] [\fB\-\-inspect\-timeout\-ms\fR] [\fB\-\-storage\-timeout\-ms\fR] [\fB\-\-retry\-attempts\fR] [\fB\-\-retry\-base\-delay\-ms\fR] [\fB\-\-retry\-max\-delay\-ms\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIremote and server\fR]
 .SH DESCRIPTION
 Connect to remote debug server
@@ -29,6 +30,9 @@ TLS private key file path (optional)
 .TP
 \fB\-\-tls\-ca\fR \fI<TLS_CA>\fR
 TLS CA certificate file path (optional, for self\-signed certs)
+.TP
+\fB\-\-session\-label\fR \fI<SESSION_LABEL>\fR
+Optional label for the remote session (helps identify sessions in logs)
 .TP
 \fB\-a\fR, \fB\-\-args\fR \fI<ARGS>\fR
 Function arguments as JSON array

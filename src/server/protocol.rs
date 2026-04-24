@@ -148,6 +148,14 @@ pub struct BreakpointDescriptor {
     pub log_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSessionInfo {
+    pub session_id: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 /// Wire protocol messages for remote debugging
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -162,6 +170,8 @@ pub enum DebugRequest {
         heartbeat_interval_ms: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idle_timeout_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_label: Option<String>,
     },
 
     /// Authenticate with the server
@@ -256,6 +266,12 @@ pub enum DebugRequest {
     /// Cancel a running execution
     Cancel,
 
+    /// Reconnect to an existing session after a transient disconnect.
+    /// The client provides the session_id it received from a previous HandshakeAck.
+    Reconnect {
+        session_id: String,
+    },
+
     /// Catch-all for forward compatibility
     #[serde(other)]
     Unknown,
@@ -272,10 +288,18 @@ pub enum DebugResponse {
         protocol_min: u32,
         protocol_max: u32,
         selected_version: u32,
+        session_id: String,
+        session_created_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heartbeat_interval_ms: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idle_timeout_ms: Option<u32>,
+        /// Opaque session identifier the client can use to reconnect after a
+        /// transient disconnect. Absent on servers that do not support reconnection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
 
     /// Handshake failed due to protocol mismatch.
@@ -301,6 +325,8 @@ pub enum DebugResponse {
         paused: bool,
         completed: bool,
         source_location: Option<SourceLocation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pause_reason: Option<String>,
     },
 
     /// Step result
@@ -309,6 +335,8 @@ pub enum DebugResponse {
         current_function: Option<String>,
         step_count: u64,
         source_location: Option<SourceLocation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pause_reason: Option<String>,
     },
 
     /// Source-level step-over result
@@ -326,6 +354,8 @@ pub enum DebugResponse {
         error: Option<String>,
         paused: bool,
         source_location: Option<SourceLocation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pause_reason: Option<String>,
     },
 
     /// Inspection result
@@ -336,6 +366,8 @@ pub enum DebugResponse {
         paused: bool,
         call_stack: Vec<String>,
         source_location: Option<SourceLocation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pause_reason: Option<String>,
     },
 
     /// Storage state
@@ -391,9 +423,18 @@ pub enum DebugResponse {
     /// Cancel acknowledged
     CancelAck,
 
-    /// List of events
-    EventsList {
-        events: Vec<crate::server::protocol::DynamicTraceEvent>,
+    /// Reconnection to an existing session was successful.
+    ReconnectAck {
+        session_id: String,
+        paused: bool,
+        current_function: Option<String>,
+        breakpoints: Vec<String>,
+        step_count: u64,
+    },
+
+    /// The requested session has expired or does not exist.
+    SessionExpired {
+        message: String,
     },
 
     /// Catch-all for forward compatibility

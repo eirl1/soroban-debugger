@@ -2,6 +2,8 @@
 
 This guide covers the most common remote-debugging failures across the CLI and the VS Code extension.
 
+> **Looking for other types of errors?** Check the Troubleshooting Index for a complete list of common symptoms and guides.
+
 ## Quick Matrix
 
 | Symptom | Where you see it | Likely cause | What to try |

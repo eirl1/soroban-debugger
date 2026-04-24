@@ -60,6 +60,7 @@ export SOROBAN_DEBUG_NO_PLUGINS=1
 
 4. **Create `plugin.toml`:**
    ```toml
+   schema_version = "1.0.0"
    name = "my-plugin"
    version = "1.0.0"
    description = "My awesome plugin"

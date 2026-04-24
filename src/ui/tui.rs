@@ -165,6 +165,9 @@ impl DebuggerUI {
             "budget" => {
                 BudgetInspector::display(self.engine.executor().host());
             }
+            "diag" | "diagnostics" => {
+                self.display_diagnostics();
+            }
             "break" => {
                 if parts.len() < 2 {
                     tracing::warn!("breakpoint set without function name");
@@ -233,6 +236,12 @@ impl DebuggerUI {
                 format!("Paused: {}", self.engine.is_paused()),
                 crate::logging::LogLevel::Info,
             );
+            if let Some(reason) = self.engine.pause_reason_label() {
+                crate::logging::log_display(
+                    format!("Pause reason: {}", reason),
+                    crate::logging::LogLevel::Info,
+                );
+            }
             if let Some(output) = &self.last_output {
                 crate::logging::log_display(
                     format!("Last result: {}", output),
@@ -277,6 +286,37 @@ impl DebuggerUI {
         Ok(())
     }
 
+    fn display_diagnostics(&self) {
+        let budget = BudgetInspector::get_cpu_usage(self.engine.executor().host());
+        let diagnostics = crate::output::collect_runtime_diagnostics(
+            self.engine.source_map().is_some(),
+            &budget,
+            self.last_error(),
+        );
+
+        if diagnostics.is_empty() {
+            crate::logging::log_display("No active diagnostics", crate::logging::LogLevel::Info);
+            return;
+        }
+
+        crate::logging::log_display("", crate::logging::LogLevel::Info);
+        crate::logging::log_display("=== Diagnostics ===", crate::logging::LogLevel::Info);
+        crate::logging::log_display("", crate::logging::LogLevel::Info);
+
+        for diagnostic in diagnostics {
+            crate::logging::log_display(
+                diagnostic.display_line(),
+                match diagnostic.severity {
+                    crate::output::DiagnosticSeverity::Notice => crate::logging::LogLevel::Info,
+                    crate::output::DiagnosticSeverity::Warning => crate::logging::LogLevel::Warn,
+                    crate::output::DiagnosticSeverity::Error => crate::logging::LogLevel::Error,
+                },
+            );
+        }
+
+        crate::logging::log_display("", crate::logging::LogLevel::Info);
+    }
+
     fn print_help(&self) {
         crate::logging::log_display(
             "Interactive debugger commands:",
@@ -311,6 +351,10 @@ impl DebuggerUI {
             crate::logging::LogLevel::Info,
         );
         crate::logging::log_display(
+            "  diagnostics | diag Show active diagnostics",
+            crate::logging::LogLevel::Info,
+        );
+        crate::logging::log_display(
             "  break <func> [cond] Set breakpoint with optional condition",
             crate::logging::LogLevel::Info,
         );
@@ -332,3 +376,5 @@ impl DebuggerUI {
         );
     }
 }
+
+/////////////////

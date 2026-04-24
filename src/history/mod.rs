@@ -7,6 +7,68 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+/// A record of a single session reconnection event.
+///
+/// Used by the server to track when clients reconnect to preserved sessions,
+/// enabling diagnostics and operator visibility into connection stability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconnectionEvent {
+    /// ISO-8601 timestamp of the reconnection.
+    pub timestamp: String,
+    /// The session identifier that was reconnected.
+    pub session_id: String,
+    /// Duration (in milliseconds) between the disconnect and the reconnection.
+    pub disconnect_duration_ms: u64,
+    /// Whether the session was still in a paused/breakpoint state at reconnect time.
+    pub was_paused: bool,
+}
+
+/// Lightweight log for tracking reconnection events within a debug session.
+///
+/// This is intentionally in-memory only. The events can be serialized to disk
+/// using [`write_json_atomically`] if persistence is required.
+#[derive(Debug, Clone, Default)]
+pub struct ReconnectionLog {
+    events: Vec<ReconnectionEvent>,
+}
+
+impl ReconnectionLog {
+    /// Create a new, empty reconnection log.
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+
+    /// Record a new reconnection event.
+    pub fn record(
+        &mut self,
+        session_id: &str,
+        disconnect_duration: Duration,
+        was_paused: bool,
+    ) {
+        self.events.push(ReconnectionEvent {
+            timestamp: Utc::now().to_rfc3339(),
+            session_id: session_id.to_string(),
+            disconnect_duration_ms: disconnect_duration.as_millis() as u64,
+            was_paused,
+        });
+    }
+
+    /// Return the number of reconnection events recorded.
+    pub fn count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Return a slice of all recorded events.
+    pub fn events(&self) -> &[ReconnectionEvent] {
+        &self.events
+    }
+
+    /// Persist the reconnection log to a JSON file using atomic writes.
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<()> {
+        write_json_atomically(path, &self.events)
+    }
+}
+
 pub fn write_json_atomically<T: Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -52,6 +114,17 @@ pub struct RunHistory {
     pub function: String,
     pub cpu_used: u64,
     pub memory_used: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSessionRecord {
+    pub session_id: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub remote_addr: String,
+    pub client_name: String,
+    pub client_version: String,
 }
 
 /// Retention policy controlling how many records to keep and their maximum age.
@@ -259,6 +332,25 @@ impl HistoryManager {
         Ok(history)
     }
 
+    pub fn append_remote_session(&self, record: RemoteSessionRecord) -> Result<()> {
+        let path = self.remote_sessions_path();
+        let mut records = if path.exists() {
+            let file = File::open(&path).map_err(|e| {
+                DebuggerError::FileError(format!(
+                    "Failed to open remote session history {:?}: {}",
+                    path, e
+                ))
+            })?;
+            let reader = BufReader::new(file);
+            serde_json::from_reader(reader).unwrap_or_else(|_| Vec::new())
+        } else {
+            Vec::new()
+        };
+
+        records.push(record);
+        write_json_atomically(&path, &records)
+    }
+
     /// Append a new record optimizing with BufWriter.
     ///
     /// No retention policy is applied. Use [`append_record_with_policy`] to
@@ -387,6 +479,15 @@ impl HistoryManager {
             ))
         })?;
         Ok(())
+    }
+
+    fn remote_sessions_path(&self) -> PathBuf {
+        let parent = self
+            .file_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        parent.join("remote_sessions.json")
     }
 
     /// Filter historical data based on optional parameters.

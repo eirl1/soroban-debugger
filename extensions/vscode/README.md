@@ -12,6 +12,7 @@ A Visual Studio Code extension that integrates the Soroban smart contract debugg
 - 🧵 **Thread Support**: Basic thread management for debugging sessions
 - 📝 **Detailed Logging**: Optional trace logging for debugging adapter interactions
 - ⚡ **Real-time Debugging**: Step through contract execution with next, step in, and step out
+- 📋 **Session Summary**: Get a concise recap of budget totals, events, storage writes, and final status when a session ends
 
 ## Privacy & Telemetry
 
@@ -259,9 +260,7 @@ The following features are **not available** in the extension.
 | TLS configuration           | `--tls-cert`, `--tls-key`                                                                      | Use CLI server/remote commands directly                                |
 | Storage export              | `--export-storage <file>`                                                                      | Use `soroban-debug run --export-storage` in a terminal                 |
 | Storage import              | `--import-storage <file>`                                                                      | Use `snapshotPath` in `launch.json` for initial state                  |
-| Event display and filtering | `--show-events`, `--event-filter`                                                              | Use `soroban-debug run --show-events` in a terminal                    |
 | Dry-run mode                | `--dry-run`                                                                                    | Use `dryRun: true` in `launch.json`                                    |
-| Cross-contract mocking      | `--mock CONTRACT.fn=value`                                                                     | Use `soroban-debug run --mock` in a terminal                           |
 | Conditional breakpoints     | (not in CLI either)                                                                            | Not supported on either surface                                        |
 | Hit-count conditions        | (not in CLI either)                                                                            | Not supported on either surface                                        |
 | Log points                  | (not in CLI either)                                                                            | Not supported on either surface                                        |
@@ -346,6 +345,52 @@ You can configure timeouts in either place:
 
 For the full CLI + VS Code matrix, see [docs/remote-troubleshooting.md](../../docs/remote-troubleshooting.md).
 
+### Event Capture and Filters
+
+To stream contract events into the Debug Console, enable `showEvents`. You can optionally add
+`eventFilter` entries to reduce noise. Filters are case-insensitive substrings by default, or
+regex patterns when prefixed with `re:`.
+
+Example:
+
+```json
+{
+  "name": "Soroban: Debug Contract",
+  "type": "soroban",
+  "request": "launch",
+  "contractPath": "${workspaceFolder}/target/wasm32-unknown-unknown/release/contract.wasm",
+  "entrypoint": "main",
+  "args": [],
+  "showEvents": true,
+  "eventFilter": ["transfer", "re:^fn_.*"],
+  "binaryPath": "${workspaceFolder}/target/debug/soroban-debug"
+}
+```
+
+Events appear in the Debug Console with an `[event]` prefix.
+
+### Cross-Contract Mocking
+
+Use `mock` to stub cross-contract calls with deterministic return values. Each entry is
+`CONTRACT_ID.function=return_value`.
+
+Example:
+
+```json
+{
+  "name": "Soroban: Debug Contract",
+  "type": "soroban",
+  "request": "launch",
+  "contractPath": "${workspaceFolder}/target/wasm32-unknown-unknown/release/contract.wasm",
+  "entrypoint": "main",
+  "args": [],
+  "mock": [
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.transfer=123",
+    "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB.balance={\"type\":\"i64\",\"value\":\"42\"}"
+  ]
+}
+```
+
 ### Debugging the Extension Itself
 
 To debug the extension code:
@@ -370,6 +415,16 @@ For troubleshooting the Debug Adapter Protocol communication:
 ```
 
 Trace output appears in the Debug Console (Ctrl+Shift+U).
+
+### Session Summary
+
+When a debug session concludes, the extension presents a concise final summary. This helps you quickly recap the execution without manually combing through logs. The summary includes:
+
+- **Final status** (Success, Failure, Panic)
+- **Budget totals** (CPU instructions and Memory consumed)
+- **Event count**
+- **Storage writes**
+- **Exported artifact paths** (e.g., traces, storage snapshots)
 
 ### Diagnostic Logging
 

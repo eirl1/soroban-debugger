@@ -1,25 +1,36 @@
 use crate::debugger::breakpoint::{BreakpointManager, BreakpointSpec};
+use crate::history::ReconnectionLog;
 use crate::debugger::engine::{DebuggerEngine, StepOverResult};
 use crate::inspector::budget::BudgetInspector;
+use crate::inspector::events::{ContractEvent, EventInspector};
+use crate::history::HistoryManager;
 use crate::server::protocol::{
     negotiate_protocol_version, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
 };
 use crate::server::protocol::{
     BreakpointCapabilities, BreakpointDescriptor, DebugMessage, DebugRequest, DebugResponse,
+    RemoteSessionInfo,
 };
 use crate::simulator::SnapshotLoader;
 use crate::Result;
+use chrono::Utc;
 use std::collections::HashSet;
 use std::fs;
 use std::io::BufReader as StdBufReader;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncBufReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
+use uuid::Uuid;
+
+/// Default grace period (in seconds) that the server will hold a session
+/// after the client connection drops before discarding the debugging context.
+pub const SESSION_GRACE_PERIOD_SECS: u64 = 300;
 
 pub struct DebugServer {
     host: String,
@@ -31,12 +42,26 @@ pub struct DebugServer {
     contract_wasm: Option<Vec<u8>>,
     repeat_count: Option<u32>,
     storage_filter: Vec<String>,
+    /// Opaque session identifier issued during the initial handshake.
+    /// Clients present this value in a `Reconnect` request to re-attach.
+    session_id: String,
+    /// Instant when the last client disconnected (used for grace-period expiry).
+    last_disconnect: Option<std::time::Instant>,
+    /// Log of successful reconnection events in the current session.
+    reconnection_log: ReconnectionLog,
 }
 
 struct PendingExecution {
     function: String,
     args: Option<String>,
 }
+
+#[derive(Clone)]
+struct SessionContext {
+    info: RemoteSessionInfo,
+}
+
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl DebugServer {
     pub fn new(
@@ -46,6 +71,9 @@ impl DebugServer {
         key_path: Option<&Path>,
         repeat_count: Option<u32>,
         storage_filter: Vec<String>,
+        show_events: bool,
+        event_filter: Vec<String>,
+        mock_specs: Vec<String>,
     ) -> Result<Self> {
         let tls_config = match (cert_path, key_path) {
             (Some(cp), Some(kp)) => Some(load_tls_config(cp, kp)?),
@@ -67,6 +95,9 @@ impl DebugServer {
             contract_wasm: None,
             repeat_count,
             storage_filter,
+            session_id: Uuid::new_v4().to_string(),
+            last_disconnect: None,
+            reconnection_log: ReconnectionLog::new(),
         })
     }
 
@@ -97,16 +128,17 @@ impl DebugServer {
                     match accept_result {
                         Ok((stream, addr)) => {
                             info!("New connection from {}", addr);
+                            let peer = addr.to_string();
                             if let Some(ref acceptor) = acceptor {
                                 match acceptor.accept(stream).await {
                                     Ok(tls_stream) => {
-                                        if let Err(e) = self.handle_single_connection(tls_stream).await {
+                                        if let Err(e) = self.handle_single_connection(tls_stream, &peer).await {
                                             error!("TLS connection error: {}", e);
                                         }
                                     }
                                     Err(e) => error!("TLS accept error: {}", e),
                                 }
-                            } else if let Err(e) = self.handle_single_connection(stream).await {
+                            } else if let Err(e) = self.handle_single_connection(stream, &peer).await {
                                 error!("TCP connection error: {}", e);
                             }
                         }
@@ -124,10 +156,26 @@ impl DebugServer {
         Ok(())
     }
 
-    async fn handle_single_connection<S>(&mut self, stream: S) -> Result<()>
+    async fn handle_single_connection<S>(&mut self, stream: S, peer_addr: &str) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        // Check if a previously "parked" session has expired before we do anything else.
+        if let Some(instant) = self.last_disconnect {
+            if instant.elapsed().as_secs() > SESSION_GRACE_PERIOD_SECS {
+                info!(
+                    "Previous session {} expired after {} seconds. Resetting session state.",
+                    self.session_id, SESSION_GRACE_PERIOD_SECS
+                );
+                self.engine = None;
+                self.pending_execution = None;
+                self.contract_wasm = None;
+                self.last_disconnect = None;
+                // Generate a new session id for this fresh connection
+                self.session_id = Uuid::new_v4().to_string();
+            }
+        }
+
         let mut authenticated = self.token.is_none();
         let mut handshake_done = false;
         let (reader, writer) = tokio::io::split(stream);
@@ -250,7 +298,12 @@ impl DebugServer {
                 continue;
             }
 
-            info!("Received request: {}", summarize_request(&request));
+            info!(
+                session_id = %session_ctx.info.session_id,
+                session_label = ?session_ctx.info.label,
+                "Received request: {}",
+                summarize_request(&request)
+            );
 
             if matches!(request, DebugRequest::Ping) {
                 let response = DebugMessage::response(message.id, DebugResponse::Pong);
@@ -265,8 +318,12 @@ impl DebugServer {
                 protocol_max,
                 heartbeat_interval_ms,
                 idle_timeout_ms,
+                session_label,
             } = &request
             {
+                if let Some(label) = session_label.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    session_ctx.info.label = Some(label.to_string());
+                }
                 let server_name = "soroban-debug".to_string();
                 let server_version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -308,11 +365,25 @@ impl DebugServer {
                                 protocol_min: PROTOCOL_MIN_VERSION,
                                 protocol_max: PROTOCOL_MAX_VERSION,
                                 selected_version,
+                                session_id: session_ctx.info.session_id.clone(),
+                                session_created_at: session_ctx.info.created_at.clone(),
+                                session_label: session_ctx.info.label.clone(),
                                 heartbeat_interval_ms: *heartbeat_interval_ms,
                                 idle_timeout_ms: idle_timeout,
+                                session_id: Some(self.session_id.clone()),
                             },
                         );
                         send_msg(response)?;
+                        if let Ok(history) = HistoryManager::new() {
+                            let _ = history.append_remote_session(crate::history::RemoteSessionRecord {
+                                session_id: session_ctx.info.session_id.clone(),
+                                created_at: session_ctx.info.created_at.clone(),
+                                label: session_ctx.info.label.clone(),
+                                remote_addr: peer_addr.to_string(),
+                                client_name: client_name.clone(),
+                                client_version: client_version.clone(),
+                            });
+                        }
                         continue;
                     }
                     Err(e) => {
@@ -405,6 +476,77 @@ impl DebugServer {
                 continue;
             }
 
+            // ── Handle Reconnect before normal request dispatch ──────────
+            if let DebugRequest::Reconnect { session_id: ref client_session_id } = request {
+                if *client_session_id != self.session_id {
+                    let response = DebugMessage::response(
+                        message.id,
+                        DebugResponse::SessionExpired {
+                            message: "Session ID does not match. The session may have been \
+                                      replaced by a newer connection or the server was restarted."
+                                .to_string(),
+                        },
+                    );
+                    send_msg(response)?;
+                    continue;
+                }
+
+                if self.engine.is_none() {
+                    let response = DebugMessage::response(
+                        message.id,
+                        DebugResponse::SessionExpired {
+                            message: "No active session found. The session may have been \
+                                      cleared due to a manual disconnect or server restart."
+                                .to_string(),
+                        },
+                    );
+                    send_msg(response)?;
+                    continue;
+                }
+
+                if let Some(instant) = self.last_disconnect.take() {
+                    self.reconnection_log.record(
+                        &self.session_id,
+                        instant.elapsed(),
+                        self.engine.as_ref().map_or(false, |e| e.is_paused()),
+                    );
+                }
+                info!("Client reconnected to session {}", self.session_id);
+
+                let (paused, current_function, step_count) = self
+                    .engine
+                    .as_ref()
+                    .and_then(|engine| {
+                        engine.state().lock().ok().map(|state| {
+                            (
+                                engine.is_paused(),
+                                state.current_function().map(|s| s.to_string()),
+                                state.step_count() as u64,
+                            )
+                        })
+                    })
+                    .unwrap_or((false, None, 0));
+
+                let breakpoints = self
+                    .engine
+                    .as_ref()
+                    .map(|e| e.breakpoints().list())
+                    .unwrap_or_default();
+
+                let response = DebugMessage::response(
+                    message.id,
+                    DebugResponse::ReconnectAck {
+                        session_id: self.session_id.clone(),
+                        paused,
+                        current_function,
+                        breakpoints,
+                        step_count,
+                    },
+                );
+                send_msg(response)?;
+                continue;
+            }
+
             let is_disconnect = matches!(&request, DebugRequest::Disconnect);
             let response = match request {
                 DebugRequest::Authenticate { .. } => DebugResponse::Authenticated {
@@ -419,14 +561,31 @@ impl DebugServer {
                         match crate::runtime::executor::ContractExecutor::new(bytes.clone()) {
                             Ok(executor) => {
                                 let mut engine = DebuggerEngine::new(executor, Vec::new());
-                                let _ = engine.enable_instruction_debug(&bytes);
-                                self.engine = Some(engine);
-                                self.pending_execution = None;
-                                self.contract_wasm = Some(bytes);
-                                DebugResponse::ContractLoaded {
-                                    size: fs::metadata(&contract_path)
-                                        .map(|m| m.len() as usize)
-                                        .unwrap_or(0),
+                                if !self.mock_specs.is_empty() {
+                                    if let Err(e) = engine.executor_mut().set_mock_specs(&self.mock_specs) {
+                                        let msg = format!("Invalid mock spec in server configuration: {}", e);
+                                        DebugResponse::Error { message: msg }
+                                    } else {
+                                        let _ = engine.enable_instruction_debug(&bytes);
+                                        self.engine = Some(engine);
+                                        self.pending_execution = None;
+                                        self.contract_wasm = Some(bytes);
+                                        DebugResponse::ContractLoaded {
+                                            size: fs::metadata(&contract_path)
+                                                .map(|m| m.len() as usize)
+                                                .unwrap_or(0),
+                                        }
+                                    }
+                                } else {
+                                    let _ = engine.enable_instruction_debug(&bytes);
+                                    self.engine = Some(engine);
+                                    self.pending_execution = None;
+                                    self.contract_wasm = Some(bytes);
+                                    DebugResponse::ContractLoaded {
+                                        size: fs::metadata(&contract_path)
+                                            .map(|m| m.len() as usize)
+                                            .unwrap_or(0),
+                                    }
                                 }
                             }
                             Err(e) => DebugResponse::Error {
@@ -522,6 +681,7 @@ impl DebugServer {
                                             paused: false,
                                             completed: true,
                                             source_location: None,
+                                            pause_reason: None,
                                         };
                                         send_msg(DebugMessage::response(message.id, resp))?;
                                         continue;
@@ -573,6 +733,9 @@ impl DebugServer {
                                                             source_location: engine
                                                                 .current_source_location()
                                                                 .map(Into::into),
+                                                            pause_reason: engine
+                                                                .pause_reason_label()
+                                                                .map(|s| s.to_string()),
                                                         }
                                                     } else {
                                                         is_executing.store(
@@ -580,7 +743,11 @@ impl DebugServer {
                                                             std::sync::atomic::Ordering::SeqCst,
                                                         );
                                                         let resp = execute_without_breakpoints(
-                                                            engine, &function, args,
+                                                            engine,
+                                                            &function,
+                                                            args,
+                                                            self.show_events,
+                                                            &self.event_filter,
                                                         );
                                                         is_executing.store(
                                                             false,
@@ -595,7 +762,11 @@ impl DebugServer {
                                                         std::sync::atomic::Ordering::SeqCst,
                                                     );
                                                     let resp = execute_without_breakpoints(
-                                                        engine, &function, args,
+                                                        engine,
+                                                        &function,
+                                                        args,
+                                                        self.show_events,
+                                                        &self.event_filter,
                                                     );
                                                     is_executing.store(
                                                         false,
@@ -614,8 +785,13 @@ impl DebugServer {
                                     } else {
                                         is_executing
                                             .store(true, std::sync::atomic::Ordering::SeqCst);
-                                        let resp =
-                                            execute_without_breakpoints(engine, &function, args);
+                                        let resp = execute_without_breakpoints(
+                                            engine,
+                                            &function,
+                                            args,
+                                            self.show_events,
+                                            &self.event_filter,
+                                        );
                                         is_executing
                                             .store(false, std::sync::atomic::Ordering::SeqCst);
                                         resp
@@ -660,6 +836,9 @@ impl DebugServer {
                                                         source_location: engine
                                                             .current_source_location()
                                                             .map(Into::into),
+                                                        pause_reason: engine
+                                                            .pause_reason_label()
+                                                            .map(|s| s.to_string()),
                                                     }
                                                 } else {
                                                     is_executing.store(
@@ -667,7 +846,11 @@ impl DebugServer {
                                                         std::sync::atomic::Ordering::SeqCst,
                                                     );
                                                     let resp = execute_without_breakpoints(
-                                                        engine, &function, args,
+                                                        engine,
+                                                        &function,
+                                                        args,
+                                                        self.show_events,
+                                                        &self.event_filter,
                                                     );
                                                     is_executing.store(
                                                         false,
@@ -682,7 +865,11 @@ impl DebugServer {
                                                     std::sync::atomic::Ordering::SeqCst,
                                                 );
                                                 let resp = execute_without_breakpoints(
-                                                    engine, &function, args,
+                                                    engine,
+                                                    &function,
+                                                    args,
+                                                    self.show_events,
+                                                    &self.event_filter,
                                                 );
                                                 is_executing.store(
                                                     false,
@@ -700,7 +887,13 @@ impl DebugServer {
                                     }
                                 } else {
                                     is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    let resp = execute_without_breakpoints(engine, &function, args);
+                                    let resp = execute_without_breakpoints(
+                                        engine,
+                                        &function,
+                                        args,
+                                        self.show_events,
+                                        &self.event_filter,
+                                    );
                                     is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
                                     resp
                                 }
@@ -729,6 +922,9 @@ impl DebugServer {
                                 current_function,
                                 step_count,
                                 source_location: engine.current_source_location().map(Into::into),
+                                pause_reason: engine
+                                    .pause_reason_label()
+                                    .map(|s| s.to_string()),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -757,6 +953,9 @@ impl DebugServer {
                                 current_function,
                                 step_count,
                                 source_location: engine.current_source_location().map(Into::into),
+                                pause_reason: engine
+                                    .pause_reason_label()
+                                    .map(|s| s.to_string()),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -799,6 +998,9 @@ impl DebugServer {
                                     source_location: engine
                                         .current_source_location()
                                         .map(Into::into),
+                                    pause_reason: engine
+                                        .pause_reason_label()
+                                        .map(|s| s.to_string()),
                                 },
                                 Err(e) => DebugResponse::Error {
                                     message: e.to_string(),
@@ -824,6 +1026,9 @@ impl DebugServer {
                                         source_location: engine
                                             .current_source_location()
                                             .map(Into::into),
+                                        pause_reason: engine
+                                            .pause_reason_label()
+                                            .map(|s| s.to_string()),
                                     }
                                 }
                                 Err(e) => DebugResponse::Error {
@@ -877,6 +1082,9 @@ impl DebugServer {
                                     source_location: engine
                                         .current_source_location()
                                         .map(Into::into),
+                                    pause_reason: engine
+                                        .pause_reason_label()
+                                        .map(|s| s.to_string()),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
@@ -886,6 +1094,9 @@ impl DebugServer {
                                     source_location: engine
                                         .current_source_location()
                                         .map(Into::into),
+                                    pause_reason: engine
+                                        .pause_reason_label()
+                                        .map(|s| s.to_string()),
                                 },
                             }
                         } else {
@@ -898,6 +1109,9 @@ impl DebugServer {
                                     source_location: engine
                                         .current_source_location()
                                         .map(Into::into),
+                                    pause_reason: engine
+                                        .pause_reason_label()
+                                        .map(|s| s.to_string()),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
@@ -907,6 +1121,9 @@ impl DebugServer {
                                     source_location: engine
                                         .current_source_location()
                                         .map(Into::into),
+                                    pause_reason: engine
+                                        .pause_reason_label()
+                                        .map(|s| s.to_string()),
                                 },
                             }
                         }
@@ -943,6 +1160,9 @@ impl DebugServer {
                                 paused: engine.is_paused(),
                                 call_stack,
                                 source_location: engine.current_source_location().map(Into::into),
+                                pause_reason: engine
+                                    .pause_reason_label()
+                                    .map(|s| s.to_string()),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -1218,6 +1438,12 @@ impl DebugServer {
                 DebugRequest::Ping => DebugResponse::Pong,
                 DebugRequest::Disconnect => DebugResponse::Disconnected,
                 DebugRequest::Cancel => DebugResponse::CancelAck,
+                DebugRequest::Reconnect { .. } => {
+                    // Already handled above; this branch is unreachable
+                    DebugResponse::Error {
+                        message: "Reconnect handled out of band".to_string(),
+                    }
+                }
                 DebugRequest::Unknown => DebugResponse::Error {
                     message: "Unknown request type. Try upgrading the server.".to_string(),
                 },
@@ -1227,8 +1453,27 @@ impl DebugServer {
             send_msg(response)?;
 
             if is_disconnect {
+                // Explicit disconnect: client intentionally ended the session.
+                // Clear the engine so the session cannot be reconnected.
+                info!("Client explicitly disconnected, clearing session state");
+                self.engine = None;
+                self.pending_execution = None;
+                self.contract_wasm = None;
+                self.last_disconnect = None;
+                // Generate a new session id for the next session
+                self.session_id = Uuid::new_v4().to_string();
                 break;
             }
+        }
+
+        // If we reach here via a broken connection (not an explicit Disconnect),
+        // preserve the engine for reconnection and record the disconnect time.
+        if self.engine.is_some() {
+            info!(
+                "Client connection lost; preserving session {} for up to {} seconds",
+                self.session_id, SESSION_GRACE_PERIOD_SECS
+            );
+            self.last_disconnect = Some(std::time::Instant::now());
         }
 
         Ok(())
@@ -1239,16 +1484,22 @@ fn execute_without_breakpoints(
     engine: &mut DebuggerEngine,
     function: &str,
     args: Option<String>,
+    show_events: bool,
+    event_filters: &[String],
 ) -> DebugResponse {
     match engine.execute_without_breakpoints(function, args.as_deref()) {
-        Ok(res) => DebugResponse::ExecutionResult {
-            success: true,
-            output: res,
-            error: None,
-            paused: engine.is_paused(),
-            completed: true,
-            source_location: engine.current_source_location().map(Into::into),
-        },
+        Ok(res) => {
+            maybe_print_events(engine, show_events, event_filters);
+            DebugResponse::ExecutionResult {
+                success: true,
+                output: res,
+                error: None,
+                paused: engine.is_paused(),
+                completed: true,
+                source_location: engine.current_source_location().map(Into::into),
+                pause_reason: engine.pause_reason_label().map(|s| s.to_string()),
+            }
+        }
         Err(e) => DebugResponse::ExecutionResult {
             success: false,
             output: String::new(),
@@ -1256,8 +1507,61 @@ fn execute_without_breakpoints(
             paused: false,
             completed: true,
             source_location: engine.current_source_location().map(Into::into),
+            pause_reason: engine.pause_reason_label().map(|s| s.to_string()),
         },
     }
+}
+
+fn maybe_print_events(engine: &DebuggerEngine, show_events: bool, event_filters: &[String]) {
+    if !show_events && event_filters.is_empty() {
+        return;
+    }
+
+    let events = match engine.executor().get_events() {
+        Ok(events) => events,
+        Err(_) => return,
+    };
+
+    let filtered = filter_events_for_output(&events, event_filters);
+    for line in EventInspector::format_events(&filtered) {
+        println!("{}", line);
+    }
+}
+
+fn filter_events_for_output(events: &[ContractEvent], filters: &[String]) -> Vec<ContractEvent> {
+    if filters.is_empty() {
+        return events.to_vec();
+    }
+
+    events
+        .iter()
+        .filter(|event| {
+            let haystack = format!(
+                "{} {} {}",
+                event.contract_id.as_deref().unwrap_or_default(),
+                event.topics.join(" "),
+                event.data
+            )
+            .to_lowercase();
+
+            filters.iter().any(|filter| {
+                let pattern = filter.trim();
+                if pattern.is_empty() {
+                    return false;
+                }
+
+                if let Some(regex_text) = pattern.strip_prefix("re:") {
+                    if let Ok(regex) = regex::Regex::new(regex_text) {
+                        return regex.is_match(&haystack);
+                    }
+                    return false;
+                }
+
+                haystack.contains(&pattern.to_lowercase())
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 fn current_storage(engine: &DebuggerEngine) -> Result<std::collections::HashMap<String, String>> {
@@ -1359,7 +1663,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_on_signal() {
-        let server = DebugServer::new("127.0.0.1".to_string(), None, None, None, None, Vec::new())
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )
             .expect("Failed to create server");
         let shutdown = server.shutdown.clone();
 
@@ -1383,7 +1697,17 @@ mod tests {
 
     #[test]
     fn test_server_initialization() {
-        let server = DebugServer::new("127.0.0.1".to_string(), None, None, None, None, Vec::new())
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            false,
+            Vec::new(),
+            Vec::new(),
+        )
             .expect("Failed to create server");
         assert_eq!(server.host, "127.0.0.1");
         assert!(server.engine.is_none());
@@ -1401,6 +1725,9 @@ mod tests {
             None,
             None,
             Vec::new(),
+            false,
+            Vec::new(),
+            Vec::new(),
         )
         .expect("Failed to create server");
         assert_eq!(server.token, Some(token));
@@ -1414,6 +1741,9 @@ mod tests {
             Some(Path::new("cert.pem")),
             None,
             None,
+            Vec::new(),
+            false,
+            Vec::new(),
             Vec::new(),
         );
         assert!(

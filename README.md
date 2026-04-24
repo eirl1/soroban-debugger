@@ -326,6 +326,8 @@ and a regression testing workflow guide.
 
 ## Examples
 
+For a comprehensive overview of available examples mapped to debugger concepts (auth, storage, plugins, etc.), see the **[Examples Index](examples/README.md)**.
+
 ### Example 1: Debug a Token Transfer
 
 ```bash

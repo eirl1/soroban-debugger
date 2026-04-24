@@ -5,9 +5,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+/// Current version of the plugin manifest schema.
+/// Follows semantic versioning. Breaking changes will increment the major version.
+pub const MANIFEST_SCHEMA_VERSION: &str = "1.0.0";
+
 /// Manifest describing a plugin and its capabilities
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
+    /// The version of the manifest schema itself.
+    #[serde(default)]
+    pub schema_version: String,
+
     /// Plugin name
     pub name: String,
 
@@ -88,6 +96,28 @@ impl PluginManifest {
 
     /// Validate the manifest
     pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version.is_empty() {
+            // For backward compatibility with manifests that don't have this field yet.
+            // We can warn here if we want, but for now, let's treat it as compatible with "1.0.0".
+        } else {
+            if !self.is_valid_semver(&self.schema_version) {
+                return Err(format!(
+                    "Invalid manifest schema version: {}",
+                    self.schema_version
+                ));
+            }
+
+            // Check for major version compatibility.
+            let manifest_major = self.schema_version.split('.').next().unwrap_or("0");
+            let supported_major = MANIFEST_SCHEMA_VERSION.split('.').next().unwrap_or("1");
+            if manifest_major != supported_major {
+                return Err(format!(
+                    "Unsupported manifest schema version. Found '{}', but this debugger supports schema version '{}'. Please update the plugin or the debugger.",
+                    self.schema_version, MANIFEST_SCHEMA_VERSION
+                ));
+            }
+        }
+
         if self.name.is_empty() {
             return Err("Plugin name cannot be empty".to_string());
         }

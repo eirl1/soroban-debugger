@@ -155,6 +155,7 @@ pub extern "C" fn create_plugin() -> *mut dyn InspectorPlugin {
 ### Step 4: Create plugin.toml
 
 ```toml
+schema_version = "1.0.0"
 name = "my-plugin"
 version = "1.0.0"
 description = "My awesome plugin for Soroban debugger"
@@ -413,6 +414,7 @@ The `plugin.toml` file describes your plugin:
 
 ```toml
 # Required fields
+schema_version = "1.0.0"
 name = "plugin-name"
 version = "1.0.0"
 description = "Plugin description"
@@ -705,11 +707,14 @@ The plugin API follows semantic versioning:
 
 Check `min_debugger_version` in your manifest to specify the minimum required debugger version.
 
+For details on manifest file versioning, see Plugin Manifest Versioning.
+
 ## Troubleshooting
 
 ### Plugin Not Loading
 
 - Check that `plugin.toml` is valid TOML
+- Check that the `schema_version` in `plugin.toml` is compatible with the debugger version.
 - Verify the library file exists and has the correct name
 - Ensure the library exports `create_plugin` symbol
 - If trust policy blocked the plugin, sign the manifest and library, add the plugin to the allowlist, or relax `SOROBAN_DEBUG_PLUGIN_TRUST_MODE` for local-only development
