@@ -419,7 +419,7 @@ show_events = true
 | Incompatible protocol | Build version mismatch | Reinstall client/server from same release |
 | Auth failed | Token mismatch | Verify `--token` values match |
 
-For more scenarios, see the [Full FAQ](docs/faq.md) and [Remote Troubleshooting Guide](docs/remote-troubleshooting.md).
+For more scenarios, see the Troubleshooting Index, Full FAQ and Remote Troubleshooting Guide.
 
 ---
 
