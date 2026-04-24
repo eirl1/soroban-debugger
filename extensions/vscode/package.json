@@ -44,6 +44,11 @@
         "command": "soroban-debugger.openDocs",
         "title": "Quick-Open Documentation",
         "category": "Soroban"
+      },
+      {
+        "command": "soroban-debugger.importTrace",
+        "title": "Import Execution Trace",
+        "category": "Soroban"
       }
     ],
     "viewsContainers": {
@@ -60,6 +65,11 @@
         {
           "id": "soroban-debugger.eventsView",
           "name": "Contract Events",
+          "contextualTitle": "Soroban"
+        },
+        {
+          "id": "soroban-debugger.traceView",
+          "name": "Execution Trace",
           "contextualTitle": "Soroban"
         }
       ]

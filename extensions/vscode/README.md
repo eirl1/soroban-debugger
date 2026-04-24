@@ -11,6 +11,7 @@ A Visual Studio Code extension that integrates the Soroban smart contract debugg
 - 📚 **Call Stack Visualization**: Examine the function call stack during execution
 - 🧵 **Thread Support**: Basic thread management for debugging sessions
 - 📝 **Detailed Logging**: Optional trace logging for debugging adapter interactions
+- 📋 **Trace Import & Inspection**: Load and explore saved execution traces from the CLI without starting a live session
 - ⚡ **Real-time Debugging**: Step through contract execution with next, step in, and step out
 - 📋 **Session Summary**: Get a concise recap of budget totals, events, storage writes, and final status when a session ends
 
