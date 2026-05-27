@@ -8,7 +8,7 @@ use crate::ui::formatter::Formatter;
 use crate::{DebuggerError, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -112,6 +112,42 @@ pub fn load_scenario(path: &Path, visiting: &mut HashSet<PathBuf>) -> Result<Vec
     Ok(all_steps)
 }
 
+/// Parsed `--tags` / `--exclude-tags` filters as `(include, exclude)`. `None`
+/// on either axis means "no filter requested for that axis".
+type TagSelection = (Option<BTreeSet<String>>, Option<BTreeSet<String>>);
+
+/// Parse the comma-separated `--tags` / `--exclude-tags` values into normalized,
+/// de-duplicated sets and reject any tag present in both (#1282).
+///
+/// Normalization trims surrounding whitespace and drops empty entries; the
+/// returned `BTreeSet`s deduplicate automatically.
+pub fn parse_tag_selection(tags: Option<&str>, exclude_tags: Option<&str>) -> Result<TagSelection> {
+    fn parse(raw: Option<&str>) -> Option<BTreeSet<String>> {
+        raw.map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+    }
+
+    let include = parse(tags);
+    let exclude = parse(exclude_tags);
+
+    if let (Some(inc), Some(exc)) = (&include, &exclude) {
+        let overlap: Vec<&str> = inc.intersection(exc).map(String::as_str).collect();
+        if !overlap.is_empty() {
+            return Err(DebuggerError::InvalidArguments(format!(
+                "tag(s) listed in both --tags and --exclude-tags: {}. A tag cannot be both included and excluded — remove it from one set.",
+                overlap.join(", ")
+            ))
+            .into());
+        }
+    }
+
+    Ok((include, exclude))
+}
+
 pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
     println!(
         "{}",
@@ -156,14 +192,32 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
     let mut all_passed = true;
     let mut variables: HashMap<String, String> = HashMap::new();
 
-    let include_tags: Option<Vec<String>> = args
-        .tags
-        .as_ref()
-        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
-    let exclude_tags: Option<Vec<String>> = args
-        .exclude_tags
-        .as_ref()
-        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
+    let (include_tags, exclude_tags) =
+        parse_tag_selection(args.tags.as_deref(), args.exclude_tags.as_deref())?;
+
+    // Show the selected / excluded tag summaries up front.
+    if let Some(inc) = &include_tags {
+        if !inc.is_empty() {
+            println!(
+                "{}",
+                Formatter::info(format!(
+                    "Included tags: {}",
+                    inc.iter().cloned().collect::<Vec<_>>().join(", ")
+                ))
+            );
+        }
+    }
+    if let Some(exc) = &exclude_tags {
+        if !exc.is_empty() {
+            println!(
+                "{}",
+                Formatter::info(format!(
+                    "Excluded tags: {}",
+                    exc.iter().cloned().collect::<Vec<_>>().join(", ")
+                ))
+            );
+        }
+    }
 
     for (i, step) in steps.iter().enumerate() {
         let step_label = step.name.as_deref().unwrap_or(&step.function);
@@ -1016,5 +1070,39 @@ function = "increment"
         assert_eq!(err.len(), 2);
         assert!(err[0].contains("CPU budget assertion failed"));
         assert!(err[1].contains("Memory budget assertion failed"));
+    }
+}
+
+#[cfg(test)]
+mod tag_selection_tests {
+    use super::parse_tag_selection;
+
+    #[test]
+    fn parses_and_normalizes_whitespace_and_duplicates() {
+        // Whitespace trimmed, empty entries dropped, duplicates collapsed.
+        let (inc, exc) = parse_tag_selection(Some(" a , b ,a, "), None).unwrap();
+        let inc = inc.unwrap();
+        assert!(inc.contains("a") && inc.contains("b"));
+        assert_eq!(inc.len(), 2);
+        assert!(exc.is_none());
+    }
+
+    #[test]
+    fn rejects_overlapping_include_and_exclude() {
+        let err = parse_tag_selection(Some("slow,db"), Some("db,flaky")).unwrap_err();
+        assert!(err.to_string().contains("db"));
+    }
+
+    #[test]
+    fn allows_disjoint_sets() {
+        let (inc, exc) = parse_tag_selection(Some("a,b"), Some("c,d")).unwrap();
+        assert_eq!(inc.unwrap().len(), 2);
+        assert_eq!(exc.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn none_inputs_yield_none() {
+        let (inc, exc) = parse_tag_selection(None, None).unwrap();
+        assert!(inc.is_none() && exc.is_none());
     }
 }

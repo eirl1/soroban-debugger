@@ -4,7 +4,7 @@
 .SH NAME
 optimize \- Analyze contract and generate gas optimization suggestions
 .SH SYNOPSIS
-\fBoptimize\fR <\fB\-c\fR|\fB\-\-contract\fR> [\fB\-f\fR|\fB\-\-function\fR] [\fB\-a\fR|\fB\-\-args\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-s\fR|\fB\-\-storage\fR] [\fB\-\-network\-snapshot\fR] [\fB\-\-expected\-hash\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBoptimize\fR <\fB\-c\fR|\fB\-\-contract\fR> [\fB\-f\fR|\fB\-\-function\fR] [\fB\-a\fR|\fB\-\-args\fR] [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-format\fR] [\fB\-s\fR|\fB\-\-storage\fR] [\fB\-\-network\-snapshot\fR] [\fB\-\-expected\-hash\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Analyze contract and generate gas optimization suggestions
 .SH OPTIONS
@@ -20,6 +20,19 @@ Function arguments as JSON array (e.g., \*(Aq["arg1", "arg2"]\*(Aq)
 .TP
 \fB\-o\fR, \fB\-\-output\fR \fI<OUTPUT>\fR
 Output file for the optimization report (default: stdout)
+.TP
+\fB\-\-format\fR \fI<FORMAT>\fR [default: pretty]
+Report format: pretty (markdown) or json (structured suggestions/hotspots/metadata)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+pretty
+.IP \(bu 2
+json
+.RE
 .TP
 \fB\-s\fR, \fB\-\-storage\fR \fI<STORAGE>\fR
 Initial storage state as JSON object

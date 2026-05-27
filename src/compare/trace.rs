@@ -149,3 +149,86 @@ impl ExecutionTrace {
         }
     }
 }
+
+/// Trace schema versions this debugger knows how to replay.
+pub const SUPPORTED_TRACE_VERSIONS: &[u64] = &[1];
+
+/// Validate a raw trace JSON value before replay execution (#1288).
+///
+/// Fails fast when the file is malformed or from an unsupported schema version:
+/// it must be a JSON object, carry a supported `version` if one is present, and
+/// have the minimum fields needed to replay (a non-empty `call_sequence` or a
+/// `function`). See `docs/trace-compatibility.md`.
+pub fn validate_trace_schema(raw: &serde_json::Value) -> crate::Result<()> {
+    let obj = raw.as_object().ok_or_else(|| {
+        crate::DebuggerError::InvalidArguments("trace file must be a JSON object".to_string())
+    })?;
+
+    if let Some(version) = obj.get("version") {
+        let v = version.as_u64().ok_or_else(|| {
+            crate::DebuggerError::InvalidArguments(
+                "trace `version` must be a positive integer".to_string(),
+            )
+        })?;
+        if !SUPPORTED_TRACE_VERSIONS.contains(&v) {
+            return Err(crate::DebuggerError::InvalidArguments(format!(
+                "unsupported trace schema version {}. This debugger supports {:?}. \
+                 Re-capture the trace with a matching debugger version, or migrate the file.",
+                v, SUPPORTED_TRACE_VERSIONS
+            ))
+            .into());
+        }
+    }
+
+    let has_calls = obj
+        .get("call_sequence")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let has_function = obj
+        .get("function")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_calls && !has_function {
+        return Err(crate::DebuggerError::InvalidArguments(
+            "malformed trace: needs a non-empty `call_sequence` or a `function` field to replay"
+                .to_string(),
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod trace_schema_tests {
+    use super::validate_trace_schema;
+    use serde_json::json;
+
+    #[test]
+    fn accepts_a_minimal_valid_trace() {
+        assert!(validate_trace_schema(&json!({ "function": "transfer" })).is_ok());
+        assert!(validate_trace_schema(
+            &json!({ "version": 1, "call_sequence": [{ "function": "f", "depth": 0 }] })
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_non_object() {
+        assert!(validate_trace_schema(&json!([1, 2, 3])).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let err = validate_trace_schema(&json!({ "version": 999, "function": "f" })).unwrap_err();
+        assert!(err.to_string().contains("unsupported trace schema version"));
+    }
+
+    #[test]
+    fn rejects_malformed_missing_required_fields() {
+        let err = validate_trace_schema(&json!({ "label": "no calls here" })).unwrap_err();
+        assert!(err.to_string().contains("malformed trace"));
+    }
+}

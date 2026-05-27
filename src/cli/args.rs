@@ -748,6 +748,10 @@ pub struct OptimizeArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
+    /// Report format: pretty (markdown) or json (structured suggestions/hotspots/metadata)
+    #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+    pub format: OutputFormat,
+
     /// Initial storage state as JSON object
     #[arg(short, long)]
     pub storage: Option<String>,
