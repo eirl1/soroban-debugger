@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SymbolicCommandOutputEnvelope",
+  "type": "object",
+  "required": ["schema_version", "command", "status", "result", "error"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "VersionedOutput envelope schema version. Symbolic JSON reports currently use 1.0.0."
+    },
+    "command": { "type": "string", "const": "symbolic" },
+    "status": { "type": "string", "enum": ["success", "error"] },
+    "result": {
+      "type": ["object", "null"],
+      "required": ["function", "paths_explored", "panics_found", "paths", "metadata"],
+      "properties": {
+        "function": { "type": "string" },
+        "paths_explored": { "type": "integer", "minimum": 0 },
+        "panics_found": { "type": "integer", "minimum": 0 },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["inputs", "return_value", "panic", "path_decisions"],
+            "properties": {
+              "inputs": { "type": "string" },
+              "return_value": { "type": ["string", "null"] },
+              "panic": { "type": ["string", "null"] },
+              "path_decisions": {
+                "type": "array",
+                "items": { "type": "object" }
+              }
+            }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "required": [
+            "config",
+            "generated_input_combinations",
+            "attempted_input_combinations",
+            "distinct_paths_recorded",
+            "truncated_by_input_cap",
+            "truncated_by_path_cap",
+            "truncated_by_timeout",
+            "truncation_reasons",
+            "seed",
+            "coverage_fraction",
+            "uncovered_regions"
+          ],
+          "properties": {
+            "config": {
+              "type": "object",
+              "required": [
+                "max_paths",
+                "max_input_combinations",
+                "timeout_secs",
+                "max_breadth",
+                "max_depth",
+                "seed",
+                "storage_seed"
+              ],
+              "properties": {
+                "max_paths": { "type": "integer", "minimum": 0 },
+                "max_input_combinations": { "type": "integer", "minimum": 0 },
+                "timeout_secs": { "type": "integer", "minimum": 0 },
+                "max_breadth": { "type": "integer", "minimum": 0 },
+                "max_depth": { "type": "integer", "minimum": 0 },
+                "seed": { "type": ["integer", "null"], "minimum": 0 },
+                "storage_seed": { "type": ["string", "null"] }
+              }
+            },
+            "generated_input_combinations": { "type": "integer", "minimum": 0 },
+            "attempted_input_combinations": { "type": "integer", "minimum": 0 },
+            "distinct_paths_recorded": { "type": "integer", "minimum": 0 },
+            "truncated_by_input_cap": { "type": "boolean" },
+            "truncated_by_path_cap": { "type": "boolean" },
+            "truncated_by_timeout": { "type": "boolean" },
+            "truncation_reasons": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "seed": { "type": ["integer", "null"], "minimum": 0 },
+            "coverage_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+            "uncovered_regions": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "type": ["object", "null"],
+      "properties": {
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

@@ -48,3 +48,19 @@ Symbolic reports now explain whether exploration was truncated by:
 - timeout
 
 Generated scenario TOML files include a `[metadata]` section with the applied budget and truncation reasons, which is useful for CI artifacts and reproducible investigations.
+
+## JSON schema
+
+Machine-readable symbolic reports are emitted with `--format json` and use the shared command envelope:
+
+```json
+{
+  "schema_version": "1.0.0",
+  "command": "symbolic",
+  "status": "success",
+  "result": {},
+  "error": null
+}
+```
+
+The current symbolic report schema is `tests/schemas/symbolic_output.json` and expects envelope `schema_version` `1.0.0`. The `result.metadata` object includes the applied seed or replay token, optional `storage_seed`, budget caps, truncation flags, truncation reasons, and coverage metadata so CI consumers can detect partial exploration and suggest raising `--input-combination-cap`, `--path-cap`, or `--timeout` when needed.
